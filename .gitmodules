@@ -1,0 +1,3 @@
+[submodule "Automata-Engine"]
+	path = Automata-Engine
+	url = https://github.com/BluBloos/Automata-Engine.git

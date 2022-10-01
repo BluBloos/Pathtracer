@@ -103,7 +103,7 @@ struct v4 {
     };
 };
 
-// TODO(Noah): replace with intrinsic
+// TODO(Noah): replace with intrinsic, probably among other changes in this file!
 inline float SquareRoot(float a) {
     float result = (float)sqrt(a);
     return result;
@@ -139,7 +139,7 @@ inline float Magnitude(v3 a) {
 }
 
 // TODO(Noah): What if the vector I am trying to normalize
-// is (0, 0, 0)? Will get divide error here.
+// is (0, 0, 0)? Will get divide error here! this is very very bad!
 inline v3 Normalize(v3 a) {
     float magnitude = Magnitude(a);
     a.x /= magnitude;
@@ -166,13 +166,15 @@ inline v3 Hadamard(v3 a, v3 b) {
 }
 
 // TODO(Noah): replcae this with better entropy later
+// return a random value from [0.0, 1.0]
 inline float RandomUnilateral() {
     float result = (float)rand() / (float)RAND_MAX;
     return result;
 }
 
+// return a random value from [-1.0, 1.0]
 inline float RandomBilateral() {
-    float result = 2.0f*RandomUnilateral() - 1.0f;
+    float result = 2.0f * RandomUnilateral() - 1.0f;
     return result;
 }
 
@@ -180,6 +182,8 @@ inline v3 Lerp(v3 a, v3 b, float p) {
     return (1.0f - p) * a + p * b;
 }
 
+// the version of linear to sRGB that is presumably correct?
+// as opposed to the linear approx version ...
 static float LinearToSRGB(float L) {
     if (L < 0.0f) {
         L = 0.0f;
