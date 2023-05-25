@@ -2,17 +2,27 @@
 #include <stdlib.h>
 #include "ray.h"
 #include <automata_engine.hpp>
+
+#include <comdef.h>
 #include <windows.h>
+
+
+#include <D3d12.h>
+#include <dxgi1_6.h>
+
+#define COM_RELEASE(comPtr) (comPtr != nullptr) ? comPtr->Release() : 0; 
 
 /*
 Next steps for the software overall:
 
 1. A greater degree in the sophistication of the simulation.
+
     - add light sources and shadows
     - "do the raytrace proper" = have your simulation conform more to the underlying Physics
     - ray propagation in the medium = volumetric light transport = fog
 
 2. "Do the ratracer proper":
+
     - Good resource:
         - http://www.cs.cornell.edu/courses/cs4620/2013fa/lectures/22mcrt.pdf
     - Cast rays from our pixels. Hit some point.
@@ -42,7 +52,7 @@ Next steps for the software overall:
             - the 101 for monte-carlo integration:
                 - Plz read here: https://graphics.stanford.edu/courses/cs348b-01/course29.hanrahan.pdf 
     
-3. Ultimate desired demo = get a monkey mesh in there (that is made of glass)
+3. Ultimate desired demo = Sponza scene.
 */
 
 static unsigned int GetTotalPixelSize(image_32_t image) {
@@ -135,7 +145,7 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
                 }
             } 
         }
-        if (hitMatIndex) {
+        if (hitMatIndex) { // if there is any material at all.
             material_t mat = world->materials[hitMatIndex];
             //TODO(Noah): Do real reflectance stuff
             result = result + Hadamard(attenuation, mat.emitColor);
@@ -199,7 +209,6 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultHeight = 720;
 }
 
-void automata_engine::Close(game_memory_t *gameMemory) { }
 
 typedef struct texel {
     int width;
@@ -260,14 +269,9 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
     ExitThread(0);
 }
 
-// TODO(Noah): There are certainly ways that we can make this Raytracer perform better overall!
-// We can literally shift the entire thing over to execution on the GPU via compute.
-// 
-// Or we can say, "some threads finish all their texels, while others are still working". We are wasting
-// potential good work! we need the master thread to notice and assign those lazy threads more work.
+// TODO: once a thread completes work it should steal texels from other threads still working.
 //
-// Finally, on a per-thread basis, we could introduce SIMD intrinsics / instructions to see if we can get
-// some more throughput there ...
+// on a per-thread basis, we could maybe introduce cpu SIMD.
 
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 #define THREAD_COUNT 7
@@ -295,13 +299,13 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                 bool isPartialTexel = false;
                 if (texel.yPos + texel.height > image.height) {
                     texel.height -= (texel.yPos + texel.height) - image.height;
-                    texel.height = max(texel.height, 0);
+                    texel.height = ae::math::max(texel.height, 0);
                     isPartialTexel = true;
                 }
                 if (xPos >= image.width) {
                     if (xPos > image.width) {
                         texel.width -= xPos - image.width;
-                        texel.width = max(texel.width, 0);
+                        texel.width = ae::math::max(texel.width, 0);
                         isPartialTexel = true;
                     }
                     xPos = 0;
@@ -348,8 +352,60 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
     ExitThread(0);
 }
 
+struct game_data {
+    ID3D12Device *d3dDevice = NULL;
+    ID3D12Debug *debugController = NULL;
+};
+
+static game_data *getGameData(ae::game_memory_t *gameMemory) {
+    return (game_data *)gameMemory->data;
+}
+
 void automata_engine::Init(game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
+
+    auto gd = getGameData(gameMemory);
+
+    HRESULT hr;
+#define INIT_FAIL_CHECK()                                                      \
+  if (hr != S_OK) {                                                            \
+    exit(hr);                                                                  \
+  }
+
+    // init the d3d device (and debug stuff)
+    {
+
+        UINT dxgiFactoryFlags = 0;W
+
+#if defined(_DEBUG)
+        {
+            if (SUCCEEDED(D3D12GetDebugInterface(
+                    IID_PPV_ARGS(&gd->debugController)))) {
+                gd->debugController->EnableDebugLayer();
+                dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+            }
+        }
+#endif
+
+        IDXGIFactory2 *dxgiFactory = NULL;
+        hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&dxgiFactory));
+        INIT_FAIL_CHECK();
+        defer(COM_RELEASE(dxgiFactory));
+
+        IDXGIAdapter1 *hardwareAdapter = nullptr;
+        ae::DX::findHardwareAdapter(dxgiFactory, &hardwareAdapter);
+        if (!hardwareAdapter)
+            exit(-1);
+        defer(COM_RELEASE(hardwareAdapter));
+
+        (hr = D3D12CreateDevice(hardwareAdapter,
+                                D3D_FEATURE_LEVEL_12_0, // minimum feature level
+                                IID_PPV_ARGS(&gd->d3dDevice)));
+        INIT_FAIL_CHECK();
+    }
+
+#undef INIT_FAIL_CHECK
+
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     image = AllocateImage(winInfo.width, winInfo.height);
     materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
@@ -393,14 +449,17 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     const char *appName = "raytracer_vis";
     ae::bifrost::registerApp(appName, visualizer);
     ae::bifrost::updateApp(gameMemory, appName);
-    CreateThread(
-        nullptr,
-        0, // default stack size.
-        master_thread,
-        nullptr,
-        0, // thread runs immediately after creation.
-        nullptr
-    );
+    CreateThread(nullptr,
+                 0, // default stack size.
+                 master_thread, nullptr,
+                 0, // thread runs immediately after creation.
+                 nullptr);
+}
+
+void automata_engine::Close(ae::game_memory_t *gameMemory) {
+    auto gd = getGameData(gameMemory);
+    COM_RELEASE(gd->d3dDevice);
+    COM_RELEASE(gd->debugController);
 }
 
 // TODO: we really do not like the below.
