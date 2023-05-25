@@ -1,4 +1,6 @@
+build
 bin/
 data/
 gist/github
 ./**/*.bmp
+*~

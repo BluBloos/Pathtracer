@@ -1,9 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "ray.h"
-#include <automata_engine.h>
+#include <automata_engine.hpp>
 #include <windows.h>
-#include <gist/github/nc_stretchy_buffers.h>
 
 /*
 Next steps for the software overall:
@@ -186,16 +185,20 @@ image_32_t image = {};
 
 // TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
 // or is this something that we can fix on the engine side?
-void visualizer(game_memory_t *gameMemory) {
+void visualizer( ae::game_memory_t *gameMemory ) {
     memcpy((void *)gameMemory->backbufferPixels, image.pixelPointer,
         sizeof(uint32_t) * gameMemory->backbufferWidth * gameMemory->backbufferHeight);
 }
 
 void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw, int nh) { }
+
 void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
     ae::defaultWindowName = "Raytracer";
+    ae::defaultWidth = 1280;
+    ae::defaultHeight = 720;
 }
+
 void automata_engine::Close(game_memory_t *gameMemory) { }
 
 typedef struct texel {
@@ -272,7 +275,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
     uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(image.width * image.height) / 
         (float)(PIXELS_PER_TEXEL * THREAD_COUNT));
-    PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
+    AELoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
     {
         HANDLE threadHandles[THREAD_COUNT];
         uint32_t xPos = 0;
@@ -310,9 +313,9 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                     if (isPartialTexel) j--; // NOTE(Noah): This is hack ...
                     StretchyBufferPush(texels, texel);
                 } else {
-                    PlatformLoggerWarn("found invalid texel:");
-                    PlatformLoggerLog("with x: %d", texel.xPos);
-                    PlatformLoggerLog("with y: %d", texel.yPos);
+                    AELoggerWarn("found invalid texel:");
+                    AELoggerLog("with x: %d", texel.xPos);
+                    AELoggerLog("with y: %d", texel.yPos);
                 }
             }
         }
@@ -348,7 +351,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 void automata_engine::Init(game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
-    image = AllocateImage(winInfo.width, winInfo.height);    
+    image = AllocateImage(winInfo.width, winInfo.height);
     materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     materials[1].refColor = V3(0.5f, 0.5f, 0.5f);
     materials[2].refColor = V3(0.7f, 0.25f, 0.3f);
@@ -387,7 +390,9 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     filmCenter = cameraP - filmDist * cameraZ;
     halfPixW = 1.0f / image.width;
     halfPixH = 1.0f / image.height;
-    automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
+    const char *appName = "raytracer_vis";
+    ae::bifrost::registerApp(appName, visualizer);
+    ae::bifrost::updateApp(gameMemory, appName);
     CreateThread(
         nullptr,
         0, // default stack size.
@@ -395,6 +400,14 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         nullptr,
         0, // thread runs immediately after creation.
         nullptr
-    );    
+    );
 }
 
+// TODO: we really do not like the below.
+void ae::OnVoiceBufferEnd(game_memory_t *gameMemory, intptr_t voiceHandle) {}
+void ae::OnVoiceBufferProcess(game_memory_t *gameMemory, intptr_t voiceHandle,
+                              float *dst, float *src, uint32_t samplesToWrite,
+                              int channels, int bytesPerSample) {}
+void ae::InitAsync(game_memory_t *gameMemory) {
+    gameMemory->setInitialized(true);
+}
