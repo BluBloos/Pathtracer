@@ -9,6 +9,7 @@
 
 #include <D3d12.h>
 #include <dxgi1_6.h>
+#include <D3dx12.h>
 
 #define COM_RELEASE(comPtr) (comPtr != nullptr) ? comPtr->Release() : 0; 
 
@@ -355,6 +356,11 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 struct game_data {
     ID3D12Device *d3dDevice = NULL;
     ID3D12Debug *debugController = NULL;
+
+    // TODO: this is only temporary.
+    ID3D12PipelineState *computePipelineState = NULL;
+    ID3D12RootSignature *computeRootSig = NULL;
+    ID3D12Resource *uavTexture = NULL;
 };
 
 static game_data *getGameData(ae::game_memory_t *gameMemory) {
@@ -375,7 +381,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     // init the d3d device (and debug stuff)
     {
 
-        UINT dxgiFactoryFlags = 0;W
+        UINT dxgiFactoryFlags = 0;
 
 #if defined(_DEBUG)
         {
@@ -404,9 +410,105 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         INIT_FAIL_CHECK();
     }
 
-#undef INIT_FAIL_CHECK
+    // create compute pipeline state for postprocess
+    {
+
+#if !defined(_DEBUG)
+        // Enable better shader debugging with the graphics debugging tools.
+        UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+        UINT compileFlags = 0;
+#endif
+
+        // set the compute root sig
+        {
+
+            // Determine supported root sig version.
+            D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
+            featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+            if (FAILED(gd->d3dDevice->CheckFeatureSupport(
+                    D3D12_FEATURE_ROOT_SIGNATURE, &featureData,
+                    sizeof(featureData)))) {
+                featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+            }
+
+            CD3DX12_DESCRIPTOR_RANGE1 ranges[1];
+            CD3DX12_ROOT_PARAMETER1 rootParameters[1];
+
+            ranges[0].Init(
+                D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+                1, // num descriptors.
+                0, // BaseShaderRegister: map to register(t0) in HLSL.
+                0, // RegisterSpace: map to register(t0, space0) in HLSL.
+                D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE // descriptor static,
+                                                          // data pointed to is
+                                                          // not.
+            );
+
+            rootParameters[0].InitAsDescriptorTable(
+                1, &ranges[0], D3D12_SHADER_VISIBILITY_ALL);
+
+            CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+            rootSignatureDesc.Init_1_1(_countof(rootParameters),
+                                       rootParameters);
+
+            // TODO: could make a func called "serialize root sig".
+            ID3DBlob *signature;
+            ID3DBlob *error;
+            defer(COM_RELEASE(signature));
+            defer(COM_RELEASE(error));
+
+            if ((hr = D3DX12SerializeVersionedRootSignature(
+                     &rootSignatureDesc, featureData.HighestVersion, &signature,
+                     &error)) == S_OK) {
+                (hr = gd->d3dDevice->CreateRootSignature(
+                     0, signature->GetBufferPointer(),
+                     signature->GetBufferSize(),
+                     IID_PPV_ARGS(&gd->computeRootSig)));
+            }
+            INIT_FAIL_CHECK();
+        }
+        // end compute root sig create.
+
+        // note that the blob is only temporary since it gets compiled into the
+        // pipeline obj.
+        ID3DBlob *computeShader = nullptr;
+
+        const wchar_t *shaderFilePath = L"res\\shader.hlsl";
+        hr = ae::DX::compileShader(shaderFilePath, "main", "cs_5_0",
+                                   compileFlags, &computeShader);
+        INIT_FAIL_CHECK();
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC computePipelineDesc = {};
+        computePipelineDesc.pRootSignature = gd->computeRootSig;
+        computePipelineDesc.CS = CD3DX12_SHADER_BYTECODE(computeShader);
+
+        hr = (gd->d3dDevice->CreateComputePipelineState(
+            &computePipelineDesc, IID_PPV_ARGS(&gd->computePipelineState)));
+        INIT_FAIL_CHECK();
+    }
 
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
+
+    // create the texture for use as an UAV.
+    // NOTE: we are actually creating a buffer, but we conceptualize this as a
+    // texture.
+
+    {
+        size_t bufferSize = winInfo.width * winInfo.height *
+                            sizeof(int); // texture format is rgba8;
+
+        // call below creates both the resource and the heap.
+        (hr = gd->d3dDevice->CreateCommittedResource(
+             &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+             D3D12_HEAP_FLAG_NONE, &CD3DX12_RESOURCE_DESC::Buffer(bufferSize),
+             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+             IID_PPV_ARGS(&gd->uavTexture)));
+        INIT_FAIL_CHECK();
+    }
+
+#undef INIT_FAIL_CHECK
+
     image = AllocateImage(winInfo.width, winInfo.height);
     materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     materials[1].refColor = V3(0.5f, 0.5f, 0.5f);
@@ -460,6 +562,9 @@ void automata_engine::Close(ae::game_memory_t *gameMemory) {
     auto gd = getGameData(gameMemory);
     COM_RELEASE(gd->d3dDevice);
     COM_RELEASE(gd->debugController);
+    COM_RELEASE(gd->computePipelineState);
+    COM_RELEASE(gd->computeRootSig);
+    COM_RELEASE(gd->uavTexture);
 }
 
 // TODO: we really do not like the below.
