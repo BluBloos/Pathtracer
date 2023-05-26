@@ -404,8 +404,10 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                     StretchyBufferPush(texels, texel);
                 } else {
                     AELoggerWarn("found invalid texel:");
-                    AELoggerLog("with x: %d", texel.xPos);
-                    AELoggerLog("with y: %d", texel.yPos);
+                    AELoggerLog("with xPos: %d", texel.xPos);
+                    AELoggerLog("with yPos: %d", texel.yPos);
+                    AELoggerLog("with width: %d", texel.width);
+                    AELoggerLog("with height: %d", texel.height);
                 }
             }
         }
