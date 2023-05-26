@@ -361,6 +361,13 @@ struct game_data {
     ID3D12PipelineState *computePipelineState = NULL;
     ID3D12RootSignature *computeRootSig = NULL;
     ID3D12Resource *uavTexture = NULL;
+    ID3D12DescriptorHeap *srvHeap = NULL;
+    D3D12_CPU_DESCRIPTOR_HANDLE uavDescriptor;
+
+    // things needed for command buffer submission.
+    ID3D12CommandQueue *commandQueue = NULL;
+    ID3D12CommandAllocator *commandAllocator = NULL;
+    ID3D12GraphicsCommandList *commandList = NULL;
 };
 
 static game_data *getGameData(ae::game_memory_t *gameMemory) {
@@ -495,15 +502,78 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     // texture.
 
     {
-        size_t bufferSize = winInfo.width * winInfo.height *
-                            sizeof(int); // texture format is rgba8;
-
         // call below creates both the resource and the heap.
         (hr = gd->d3dDevice->CreateCommittedResource(
              &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-             D3D12_HEAP_FLAG_NONE, &CD3DX12_RESOURCE_DESC::Buffer(bufferSize),
-             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+             D3D12_HEAP_FLAG_NONE,
+             &CD3DX12_RESOURCE_DESC::Tex2D(
+                 DXGI_FORMAT_R8G8B8A8_UNORM, winInfo.width, winInfo.height, 1,
+                 0, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
              IID_PPV_ARGS(&gd->uavTexture)));
+        INIT_FAIL_CHECK();
+    }
+
+    // create the UAV descriptor heap + descriptor.
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+        srvHeapDesc.NumDescriptors = 1;
+        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        (hr = gd->d3dDevice->CreateDescriptorHeap(&srvHeapDesc,
+                                                  IID_PPV_ARGS(&gd->srvHeap)));
+        INIT_FAIL_CHECK();
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE uavHandle(
+            gd->srvHeap->GetCPUDescriptorHandleForHeapStart());
+        gd->d3dDevice->CreateUnorderedAccessView(
+            gd->uavTexture,
+            nullptr, // no counter.
+            &uavDesc,
+            uavHandle // where to write the descriptor.
+        );
+    }
+
+    // create what we need so that we can submit commands to the GPU.
+    {
+        // queue.
+        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        (hr = gd->d3dDevice->CreateCommandQueue(
+             &queueDesc, IID_PPV_ARGS(&gd->commandQueue)));
+        INIT_FAIL_CHECK();
+
+        // command allocator.
+        (hr = gd->d3dDevice->CreateCommandAllocator(
+             D3D12_COMMAND_LIST_TYPE_DIRECT,
+             IID_PPV_ARGS(&gd->commandAllocator)));
+        INIT_FAIL_CHECK();
+
+        // command list.
+        (hr = gd->d3dDevice->CreateCommandList(
+             0, // nodemask, this is for single GPU scenarios.
+             D3D12_COMMAND_LIST_TYPE_DIRECT,
+             gd->commandAllocator, // how the device allocates commands for this
+                                   // list.
+             nullptr, // initial pipeline state.
+             IID_PPV_ARGS(&gd->commandList)));
+        INIT_FAIL_CHECK();
+    }
+
+    // record the compute work.
+    {
+        auto cmd = gd->commandList;
+        cmd->SetPipelineState(gd->computePipelineState);
+        cmd->SetComputeRootSignature(gd->computeRootSig);
+        cmd->SetComputeRootDescriptorTable(
+            0, gd->srvHeap->GetGPUDescriptorHandleForHeapStart());
+        cmd->Dispatch(ae::math::div_ceil(winInfo.width, 16),
+                      ae::math::div_ceil(winInfo.height, 16), 1);
+        hr = (cmd->Close());
         INIT_FAIL_CHECK();
     }
 
@@ -560,11 +630,21 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
 void automata_engine::Close(ae::game_memory_t *gameMemory) {
     auto gd = getGameData(gameMemory);
-    COM_RELEASE(gd->d3dDevice);
-    COM_RELEASE(gd->debugController);
+
+    // TODO: is there a proper order to release these objects?
+
+    COM_RELEASE(gd->commandQueue);
+    COM_RELEASE(gd->commandList);
+    COM_RELEASE(gd->commandAllocator);
+
     COM_RELEASE(gd->computePipelineState);
     COM_RELEASE(gd->computeRootSig);
+
+    COM_RELEASE(gd->srvHeap);
     COM_RELEASE(gd->uavTexture);
+
+    COM_RELEASE(gd->debugController);
+    COM_RELEASE(gd->d3dDevice);
 }
 
 // TODO: we really do not like the below.
