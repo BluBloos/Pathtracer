@@ -251,6 +251,9 @@ void visualizer(ae::game_memory_t *gameMemory) {
         WaitForSingleObjectEx(gd->fenceEvent, INFINITE, FALSE);
     }
 
+    // NOTE: the tex that we get from read subresource has been swizzled in the shader
+    // to match our surface format.
+    
     D3D12_BOX box = {};
     box.right = gameMemory->backbufferWidth;
     box.bottom = gameMemory->backbufferHeight;

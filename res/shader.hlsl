@@ -21,5 +21,8 @@ void copy_shader(uint3 DTid : SV_DispatchThreadID)
     //cpuTex[DTid.xy] = gpuTex.Load(DTid.xy);
     // for now, we just output a pure red.	
     cpuTex[DTid.xy] = float4(1.0, 0.0, 0.0, 1.0);
+
+    // swizzle the colors because our output surface expects so.
+    cpuTex[DTid.xy].rgba = cpuTex[DTid.xy].bgra;
 }
 
