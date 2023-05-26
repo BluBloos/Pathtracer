@@ -56,8 +56,38 @@ Next steps for the software overall:
 3. Ultimate desired demo = Sponza scene.
 */
 
+
+#define DXR_MODE 1
+
+struct game_data {
+  ID3D12Device *d3dDevice = NULL;
+  ID3D12Debug *debugController = NULL;
+
+  ID3D12PipelineState *computePipelineState = NULL;
+  ID3D12RootSignature *computeRootSig = NULL;
+
+  ID3D12Resource *uavTexture = NULL;
+  ID3D12Resource *image = NULL;
+
+  ID3D12DescriptorHeap *srvHeap = NULL;
+
+  // things needed for command buffer submission.
+  ID3D12CommandQueue *commandQueue = NULL;
+  ID3D12CommandAllocator *commandAllocator = NULL;
+  ID3D12GraphicsCommandList *commandList = NULL;
+
+  // things needed for CPU GPU
+  ID3D12Fence *fence = NULL;
+  int fenceValue;
+  HANDLE fenceEvent;
+};
+
+static game_data *getGameData(ae::game_memory_t *gameMemory) {
+  return (game_data *)gameMemory->data;
+}
+
 static unsigned int GetTotalPixelSize(image_32_t image) {
-    return image.height * image.width * sizeof(unsigned int);
+  return image.height * image.width * sizeof(unsigned int);
 }
 
 static image_32_t AllocateImage(unsigned int width, unsigned int height) {
@@ -194,14 +224,58 @@ float halfPixH;
 unsigned int raysPerPixel = 256;
 image_32_t image = {};
 
-// TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
-// or is this something that we can fix on the engine side?
-void visualizer( ae::game_memory_t *gameMemory ) {
+void visualizer(ae::game_memory_t *gameMemory) {
+
+#define UPDATE_FAIL_CHECK()                                                    \
+  if (hr != S_OK)                                                              \
+    return;
+
+    HRESULT hr;
+
+#if DXR_MODE
+
+    auto gd = getGameData(gameMemory);
+
+    // Execute the command list.
+    ID3D12CommandList *ppCommandLists[] = {gd->commandList};
+    gd->commandQueue->ExecuteCommandLists(1, ppCommandLists);
+
+    // wait for that work to complete:
+    {
+        // Schedule a Signal command in the queue.
+        hr = (gd->commandQueue->Signal(gd->fence, ++gd->fenceValue));
+        UPDATE_FAIL_CHECK();
+
+        hr = (gd->fence->SetEventOnCompletion(gd->fenceValue, gd->fenceEvent));
+        UPDATE_FAIL_CHECK();
+        WaitForSingleObjectEx(gd->fenceEvent, INFINITE, FALSE);
+    }
+
+    D3D12_BOX box = {};
+    box.right = gameMemory->backbufferWidth;
+    box.bottom = gameMemory->backbufferHeight;
+    box.back = 1; // depth of one.
+
+    UINT rowPitch = sizeof(uint32_t) * gameMemory->backbufferWidth;
+    hr = gd->image->ReadFromSubresource(gameMemory->backbufferPixels, rowPitch,
+                                        rowPitch * gameMemory->backbufferHeight,
+                                        0, // src subresource.
+                                        &box);
+
+#else
+    // TODO(Noah): Right now, the image is upside-down. Do we fix this on the
+    // application side or is this something that we can fix on the engine side?
     memcpy((void *)gameMemory->backbufferPixels, image.pixelPointer,
-        sizeof(uint32_t) * gameMemory->backbufferWidth * gameMemory->backbufferHeight);
+           sizeof(uint32_t) * gameMemory->backbufferWidth *
+               gameMemory->backbufferHeight);
+
+#endif // DXR_MODE
+
+#undef UPDATE_FAIL_CHECK
 }
 
-void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw, int nh) { }
+void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw,
+                                         int nh) {}
 
 void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
@@ -353,26 +427,6 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
     ExitThread(0);
 }
 
-struct game_data {
-    ID3D12Device *d3dDevice = NULL;
-    ID3D12Debug *debugController = NULL;
-
-    // TODO: this is only temporary.
-    ID3D12PipelineState *computePipelineState = NULL;
-    ID3D12RootSignature *computeRootSig = NULL;
-    ID3D12Resource *uavTexture = NULL;
-    ID3D12DescriptorHeap *srvHeap = NULL;
-    D3D12_CPU_DESCRIPTOR_HANDLE uavDescriptor;
-
-    // things needed for command buffer submission.
-    ID3D12CommandQueue *commandQueue = NULL;
-    ID3D12CommandAllocator *commandAllocator = NULL;
-    ID3D12GraphicsCommandList *commandList = NULL;
-};
-
-static game_data *getGameData(ae::game_memory_t *gameMemory) {
-    return (game_data *)gameMemory->data;
-}
 
 void automata_engine::Init(game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
@@ -444,7 +498,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
             ranges[0].Init(
                 D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
-                1, // num descriptors.
+                2, // num descriptors.
                 0, // BaseShaderRegister: map to register(t0) in HLSL.
                 0, // RegisterSpace: map to register(t0, space0) in HLSL.
                 D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE // descriptor static,
@@ -482,7 +536,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         ID3DBlob *computeShader = nullptr;
 
         const wchar_t *shaderFilePath = L"res\\shader.hlsl";
-        hr = ae::DX::compileShader(shaderFilePath, "main", "cs_5_0",
+        hr = ae::DX::compileShader(shaderFilePath, "copy_shader", "cs_5_0",
                                    compileFlags, &computeShader);
         INIT_FAIL_CHECK();
 
@@ -497,27 +551,51 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
 
-    // create the texture for use as an UAV.
-    // NOTE: we are actually creating a buffer, but we conceptualize this as a
-    // texture.
-
+    // create the textures for use as UAVs.
     {
-        // call below creates both the resource and the heap.
+        // create the primary texture that sits in GPU memory for fast write.
         (hr = gd->d3dDevice->CreateCommittedResource(
              &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
              D3D12_HEAP_FLAG_NONE,
              &CD3DX12_RESOURCE_DESC::Tex2D(
                  DXGI_FORMAT_R8G8B8A8_UNORM, winInfo.width, winInfo.height, 1,
                  0, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+             nullptr, // optimized clear.
              IID_PPV_ARGS(&gd->uavTexture)));
+        INIT_FAIL_CHECK();
+
+        // create the texture for CPU side memcpy to backbuffer, for blit to
+        // window.
+        D3D12_HEAP_PROPERTIES hPROP = {};
+        hPROP.Type = D3D12_HEAP_TYPE_CUSTOM;
+        hPROP.MemoryPoolPreference = D3D12_MEMORY_POOL_L0; // system RAM.
+
+        // write back here is a cache protocol in which when the CPU writes to
+        // the page (the virt mem mapped to the heap), this is written to cache
+        // instead of whatever backs the cache (the heap). write back is a fair
+        // protocol since the CPU does not require write access.
+        hPROP.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+
+        (hr = gd->d3dDevice->CreateCommittedResource(
+             &hPROP, D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+             &CD3DX12_RESOURCE_DESC::Tex2D(
+                 DXGI_FORMAT_R8G8B8A8_UNORM, winInfo.width, winInfo.height, 1,
+                 0, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+             D3D12_RESOURCE_STATE_COMMON, /// initial access.
+             nullptr,                     // optimized clear.
+             IID_PPV_ARGS(&gd->image)));
+        INIT_FAIL_CHECK();
+
+        hr = gd->image->Map(0, NULL, nullptr);
+
         INIT_FAIL_CHECK();
     }
 
-    // create the UAV descriptor heap + descriptor.
+    // create the UAV descriptor heap + descriptors.
     {
         D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-        srvHeapDesc.NumDescriptors = 1;
+        srvHeapDesc.NumDescriptors = 2;
         srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         (hr = gd->d3dDevice->CreateDescriptorHeap(&srvHeapDesc,
@@ -530,8 +608,20 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
         CD3DX12_CPU_DESCRIPTOR_HANDLE uavHandle(
             gd->srvHeap->GetCPUDescriptorHandleForHeapStart());
+
         gd->d3dDevice->CreateUnorderedAccessView(
             gd->uavTexture,
+            nullptr, // no counter.
+            &uavDesc,
+            uavHandle // where to write the descriptor.
+        );
+
+        int off = gd->d3dDevice->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        uavHandle.Offset(1, off);
+
+        gd->d3dDevice->CreateUnorderedAccessView(
+            gd->image,
             nullptr, // no counter.
             &uavDesc,
             uavHandle // where to write the descriptor.
@@ -567,14 +657,52 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     // record the compute work.
     {
         auto cmd = gd->commandList;
-        cmd->SetPipelineState(gd->computePipelineState);
+
+        // NOTE(handmade_gpu): this sort of API doesn't make sense to me.
+        // if the pipeline already contains the signature, why must I bind both
+        // here?
+        cmd->SetPipelineState(
+            gd->computePipelineState); // contains the monolithic shader.
         cmd->SetComputeRootSignature(gd->computeRootSig);
+
+        // bind heap and point the compute root sig to that heap.
+        ID3D12DescriptorHeap *ppHeaps[] = {gd->srvHeap};
+        cmd->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
         cmd->SetComputeRootDescriptorTable(
             0, gd->srvHeap->GetGPUDescriptorHandleForHeapStart());
+
+        cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+                                    gd->image, D3D12_RESOURCE_STATE_COMMON,
+                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+
         cmd->Dispatch(ae::math::div_ceil(winInfo.width, 16),
-                      ae::math::div_ceil(winInfo.height, 16), 1);
+                      ae::math::div_ceil(winInfo.height, 16),
+                      1); // using the pipeline.
+
+        cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(
+                                    gd->image,
+                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                    D3D12_RESOURCE_STATE_COMMON));
+
         hr = (cmd->Close());
         INIT_FAIL_CHECK();
+    }
+
+    // Create synchronization objects.
+    {
+
+        (hr = gd->d3dDevice->CreateFence(0, // init value,
+                                         D3D12_FENCE_FLAG_NONE,
+                                         IID_PPV_ARGS(&gd->fence)));
+        INIT_FAIL_CHECK();
+
+        // Create an event. We can signal event to have all threads blocked by
+        // WaitForSingleEvent now unblocked.
+        gd->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (gd->fenceEvent == nullptr) {
+            (hr = HRESULT_FROM_WIN32(GetLastError()));
+            INIT_FAIL_CHECK();
+        }
     }
 
 #undef INIT_FAIL_CHECK
@@ -642,7 +770,10 @@ void automata_engine::Close(ae::game_memory_t *gameMemory) {
 
     COM_RELEASE(gd->srvHeap);
     COM_RELEASE(gd->uavTexture);
+    COM_RELEASE(gd->image);
 
+    COM_RELEASE(gd->fence);
+    
     COM_RELEASE(gd->debugController);
     COM_RELEASE(gd->d3dDevice);
 }
