@@ -3,6 +3,8 @@
 #include "ray.h"
 #include <automata_engine.hpp>
 
+#include <synchapi.h>
+
 #include <comdef.h>
 #include <windows.h>
 
@@ -224,15 +226,12 @@ float halfPixH;
 unsigned int raysPerPixel = 256;
 image_32_t image = {};
 
-void visualizer(ae::game_memory_t *gameMemory) {
-
+void blitToGameBackbuffer(ae::game_memory_t *gameMemory) {
 #define UPDATE_FAIL_CHECK()                                                    \
   if (hr != S_OK)                                                              \
     return;
 
     HRESULT hr;
-
-#if DXR_MODE
 
     auto gd = getGameData(gameMemory);
 
@@ -251,9 +250,9 @@ void visualizer(ae::game_memory_t *gameMemory) {
         WaitForSingleObjectEx(gd->fenceEvent, INFINITE, FALSE);
     }
 
-    // NOTE: the tex that we get from read subresource has been swizzled in the shader
-    // to match our surface format.
-    
+    // NOTE: the tex that we get from read subresource has been swizzled in the
+    // shader to match our surface format.
+
     D3D12_BOX box = {};
     box.right = gameMemory->backbufferWidth;
     box.bottom = gameMemory->backbufferHeight;
@@ -265,6 +264,15 @@ void visualizer(ae::game_memory_t *gameMemory) {
                                         0, // src subresource.
                                         &box);
 
+#undef UPDATE_FAIL_CHECK
+}
+
+void visualizer(ae::game_memory_t *gameMemory) {
+
+#if DXR_MODE
+
+    blitToGameBackbuffer(gameMemory);
+
 #else
     // TODO(Noah): Right now, the image is upside-down. Do we fix this on the
     // application side or is this something that we can fix on the engine side?
@@ -273,8 +281,6 @@ void visualizer(ae::game_memory_t *gameMemory) {
                gameMemory->backbufferHeight);
 
 #endif // DXR_MODE
-
-#undef UPDATE_FAIL_CHECK
 }
 
 void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw,
@@ -283,10 +289,9 @@ void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw,
 void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
     ae::defaultWindowName = "Raytracer";
-    ae::defaultWidth = 1280;
-    ae::defaultHeight = 720;
+    ae::defaultWidth = 300;
+    ae::defaultHeight = 300;
 }
-
 
 typedef struct texel {
     int width;
@@ -352,6 +357,9 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
 // on a per-thread basis, we could maybe introduce cpu SIMD.
 
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
+
+  auto gameMemory = (ae::game_memory_t *)lpParameter;
+  
 #define THREAD_COUNT 7
 #define THREAD_GROUP_SIZE 32
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
@@ -424,15 +432,31 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
         }
         StretchyBufferFree(texels);
     }
-    
-    WriteImage(image, "test.bmp");    
-    printf("Done. Image written to test.bmp\n");
+
+    image_32_t img = {};
+#if DXR_MODE
+    // NOTE: this is a little hacky but I don't think its TOO bad. it could of
+    // course
+    //  be better. but anyways, we're going to sleep this thread for just a
+    //  little bit. in doing so, we allow the render thread to "catch up" and
+    //  fetch to the game backbuffer the very last image. the final image is
+    //  const, so doesn't matter if the render thread fetches many time. just
+    //  need it to have fetched the final at least once.
+    Sleep(500 // ms
+    );
+    img.width = gameMemory->backbufferWidth;
+    img.height = gameMemory->backbufferHeight;
+    img.pixelPointer = gameMemory->backbufferPixels;
+#else
+    img = image;
+#endif
+    WriteImage(img, "test.bmp");
+    AELoggerLog("Done. Image written to test.bmp\n");
     ExitThread(0);
 }
 
-
 void automata_engine::Init(game_memory_t *gameMemory) {
-    printf("Doing stuff...\n");
+    AELoggerLog("Doing stuff...\n");
 
     auto gd = getGameData(gameMemory);
 
@@ -754,7 +778,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     ae::bifrost::updateApp(gameMemory, appName);
     CreateThread(nullptr,
                  0, // default stack size.
-                 master_thread, nullptr,
+                 master_thread,
+                 (void*)gameMemory,
                  0, // thread runs immediately after creation.
                  nullptr);
 }
