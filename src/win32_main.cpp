@@ -59,6 +59,33 @@ Next steps for the software overall:
 */
 
 
+/*
+
+  changes required for the DXR version:
+
+  - for starters, we know that all the geometry in our scene is opaque, so we will not need the any hits.
+  - we are using procedural shapes, so we'll need to use the intersection shader.
+  - our closest hit shader is going to write to UAV if it is the 8th bounce. this shader will spawn shaders,
+  unless we have hit the bounce count. that's the terminal condition.
+  this is gonna be the meat and is going to replace the bulk of what we have below.
+  - the miss shader should just give the sky color.
+  - we're gonna actually keep trying to do the "texel" thing. this can be done by doing the DispatchRays call
+  per texel.
+  - the ray gen shader is where we do the 256 ray_pp idea. I think this is literally going to do nothing where
+  it just calls TraceRay.
+
+  - we'll use two blas and one tlas. the blas kinds are inf plane and sphere, each procedural geometry.
+  the tlas will be the five instances of those that are currently in the scene.  
+
+  - so without looking into the details of DXR; I see two options for how we can have two different materials.
+  1. we can use wholly different shaders.
+  2. if the metadata of instances is permissive enough, we can use this to encode our material parameters.
+  most importantly, the scatter factor; which controls how random of a bounce to do.
+
+ */ 
+
+
+
 #define DXR_MODE 1
 
 struct game_data {
@@ -178,7 +205,7 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
                 }
             } 
         }
-        if (hitMatIndex) { // if there is any material at all.
+        if (hitMatIndex) {
             material_t mat = world->materials[hitMatIndex];
             //TODO(Noah): Do real reflectance stuff
             result = result + Hadamard(attenuation, mat.emitColor);
@@ -198,6 +225,7 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
             rayDirection = Normalize(Lerp(randomBounce, pureBounce, mat.scatter));
         }
         else {
+          // sky contrib and terminate all future bounces;
             material_t mat = world->materials[hitMatIndex];
             result = result + Hadamard(attenuation, mat.emitColor);
             break;
@@ -576,6 +604,11 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         hr = (gd->d3dDevice->CreateComputePipelineState(
             &computePipelineDesc, IID_PPV_ARGS(&gd->computePipelineState)));
         INIT_FAIL_CHECK();
+    }
+    
+    // create the raytracing pipeline.
+    {
+      // TODO: need to use shader model 6.3
     }
 
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
