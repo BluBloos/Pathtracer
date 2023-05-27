@@ -21,8 +21,8 @@ void copy_shader(uint3 DTid : SV_DispatchThreadID)
 
 struct MyPayload
 {
-  float3 color;
-  float3 attenuation;
+  float4 color;
+  float4 attenuation;
 };
 
 struct MyAttributes
@@ -34,9 +34,9 @@ struct MyAttributes
 
 struct material_t
 {
-  float3 emitColor;
-  float3 scatter;
-  float3 refColor;
+  float4 emitColor;
+  float4 scatter;
+  float4 refColor;
 };
 
 struct plane_t
@@ -46,18 +46,26 @@ struct plane_t
   uint matIndex;
 };
 
-// NOTE: for now these are fixed size arrays for simplicity.
-struct world
+
+struct image_t
 {
-  material_t materials[1];
-  plane_t    planes[1];
+  uint width;
+  uint height;
 };
-  
+
+cbuffer MyConstantBuffer : register(b0)
+{
+  // NOTE: for now, these are fixed size arrays for simplicity.
+  material_t world_materials[1];
+  plane_t    world_planes[1];
+  image_t    world_image;
+};
 
 
 // raw buffer SRV.
-RaytracingAccelerationStructure MyScene[] : register(t0);
+RaytracingAccelerationStructure MyScene : register(t0);
 
+/*
 // TODO: 
 HitGroup my_group_name = 
 { 
@@ -79,11 +87,14 @@ RaytracingPipelineConfig config_name =
 {
     8//maxTraceRecursionDepth
 };
+*/
 
 
 float RandomBilateral()
 {
-  return noise();
+  //TODO: 
+  return 0;
+ //  return noise(0);
 }
 
 // some magic sauce. TODO: this can be much better anyways.
@@ -101,19 +112,21 @@ void LinearToSRGB(inout float L)
     }
     L=S;
 }
-void LinearToSRGB(inout float3 L)
+void LinearToSRGB(inout float4 L)
 {
   LinearToSRGB(L.x);
   LinearToSRGB(L.y);
   LinearToSRGB(L.z);
+  LinearToSRGB(L.w);
 }
 
-const uint constRayFlags=         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
+// TODO: this is giving us an error or something like that;
+uint constRayFlags=         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
 
 [shader("raygeneration")]
 void ray_gen_shader()
 {
-  auto rayIndex=DispatchRaysIndex();
+  uint3 rayIndex=DispatchRaysIndex();
   float x=rayIndex.x;
   float y=rayIndex.y;
   
@@ -125,16 +138,33 @@ void ray_gen_shader()
   const float3 cameraZ = normalize(cameraP);
   const float3  cameraX = normalize(cross(float3(0,0,1), cameraZ));
   const float3 cameraY = normalize(cross(cameraZ, cameraX));
-   
-  float halfPixW = 1.0f / world.image.width;
-  float halfPixH = 1.0f / world.image.height; 
-  float filmY = -1.0f + 2.0f * (float)y / (float)world.image.height;
-  float filmX = -1.0f + 2.0f * (float)x / (float)world.image.width;
 
-  float3 color = {};
+  // TODO: there is a bunch of crap here that can move to CPU side
+  // compute, or that are constants and only need to be compute once.
+
+  float halfPixW = 1.0f / world_image.width;
+  float halfPixH = 1.0f / world_image.height;
+
+  float filmH = 1;
+  float filmW = 1;
+  if (world_image.width > world_image.height) {
+    filmH = filmW * (float)world_image.height / (float)world_image.width;
+  } else if (world_image.height > world_image.width) {
+    filmW = filmH * (float)world_image.width / (float)world_image.height;
+  }
+
+  float halfFilmW = filmW / 2.0f;
+  float halfFilmH = filmH / 2.0f;
+
+  float filmY = -1.0f + 2.0f * (float)y / (float)world_image.height;
+  float filmX = -1.0f + 2.0f * (float)x / (float)world_image.width;
+
+  float4 color = float4(0,0,0,0);
   float contrib = 1.0f / (float)raysPerPixel;
+  const float filmDist=1;
+  float3 filmCenter = cameraP - filmDist * cameraZ;
 
-  for (int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) {
+  for (int i = 0; i < raysPerPixel; i++) {
 
     float offX = filmX + (RandomBilateral() * halfPixW);
     float offY = filmY + (RandomBilateral() * halfPixH);
@@ -143,10 +173,11 @@ void ray_gen_shader()
     float3 rayDirection = normalize(filmP - cameraP);
 
     //    RayCast(&world, rayOrigin, rayDirection);
-    RayDesc r={};
+    RayDesc r;
     r.Origin=rayOrigin;
     r.Direction=rayDirection;
     r.TMax=100;//TODO:
+    r.TMin=0;
     MyPayload p;
     TraceRay(
              MyScene,
@@ -171,8 +202,11 @@ void ray_gen_shader()
 [shader("miss")]
 void miss_main(inout MyPayload payload)
 {
-  // TODO:  compute contributions of sky.
+  //TODO: need to factor in the attenuation.
+  payload.color += float4(0,0x82,0xF0,0xFF);
 }
+
+/* 
 
 //TODO: we'll also want the sphere intersection idea.
 [shader("intersection")]
@@ -196,7 +230,7 @@ void intersection_plane()
   //TODO: also need to define plane_t.
   
   // check hit.
-  plane_t plane = world.planes[id];
+  plane_t plane = world_planes[id];
   float denom = dot(plane.n, rayDirection);
   if ((denom < -tolerance) || (denom > tolerance))
     {
@@ -213,16 +247,18 @@ void intersection_plane()
   if(hit)
     ReportHit(
               attr.hitDistance//THit
-              /*hitKind*/ 0,
+              0, //hitkind
               attr);
   
 }
+*/
 
+ /*
 [shader("closesthit")]
 void closesthit_main(inout MyPayload payload, in MyAttributes attr)
 {
 
-  material_t mat = world.materials[attr.hitMatIndex];
+  material_t mat = world_materials[attr.hitMatIndex];
 
   // make the contribution!!!!!!!!!!!!
   payload.color = payload.result + Hadamard(payload.attenuation, mat.emitColor);
@@ -258,3 +294,4 @@ void closesthit_main(inout MyPayload payload, in MyAttributes attr)
             reflectedRay,
             payload);
 }
+*/

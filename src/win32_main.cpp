@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "ray.h"
+#include "ray_dxr.h"
 #include <automata_engine.hpp>
 
 #include <synchapi.h>
@@ -93,11 +94,12 @@ struct game_data {
   ID3D12Debug *debugController = NULL;
 
   ID3D12PipelineState *computePipelineState = NULL;
-  ID3D12RootSignature *computeRootSig = NULL;
+  ID3D12RootSignature *rootSig = NULL;
 
   ID3D12Resource *uavTexture = NULL;
   ID3D12Resource *image = NULL;
-
+  ID3D12Resource *sceneBuffer = NULL;
+  
   ID3D12DescriptorHeap *srvHeap = NULL;
 
   // things needed for command buffer submission.
@@ -493,7 +495,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     HRESULT hr;
 #define INIT_FAIL_CHECK()                                                      \
   if (hr != S_OK) {                                                            \
-    exit(hr);                                                                  \
+    return;                                                                    \
   }
 
     // init the d3d device (and debug stuff)
@@ -519,7 +521,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         IDXGIAdapter1 *hardwareAdapter = nullptr;
         ae::DX::findHardwareAdapter(dxgiFactory, &hardwareAdapter);
         if (!hardwareAdapter)
-            exit(-1);
+          return;
         defer(COM_RELEASE(hardwareAdapter));
 
         (hr = D3D12CreateDevice(hardwareAdapter,
@@ -528,93 +530,95 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         INIT_FAIL_CHECK();
     }
 
-    // create compute pipeline state for postprocess
+    // create the root sig.
     {
 
-#if !defined(_DEBUG)
-        // Enable better shader debugging with the graphics debugging tools.
-        UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#else
-        UINT compileFlags = 0;
-#endif
-
-        // set the compute root sig
-        {
-
-            // Determine supported root sig version.
-            D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
-            featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
-            if (FAILED(gd->d3dDevice->CheckFeatureSupport(
-                    D3D12_FEATURE_ROOT_SIGNATURE, &featureData,
-                    sizeof(featureData)))) {
-                featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
-            }
-
-            CD3DX12_DESCRIPTOR_RANGE1 ranges[1];
-            CD3DX12_ROOT_PARAMETER1 rootParameters[1];
-
-            ranges[0].Init(
-                D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
-                2, // num descriptors.
-                0, // BaseShaderRegister: map to register(t0) in HLSL.
-                0, // RegisterSpace: map to register(t0, space0) in HLSL.
-                D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE // descriptor static,
-                                                          // data pointed to is
-                                                          // not.
-            );
-
-            rootParameters[0].InitAsDescriptorTable(
-                1, &ranges[0], D3D12_SHADER_VISIBILITY_ALL);
-
-            CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
-            rootSignatureDesc.Init_1_1(_countof(rootParameters),
-                                       rootParameters);
-
-            // TODO: could make a func called "serialize root sig".
-            ID3DBlob *signature;
-            ID3DBlob *error;
-            defer(COM_RELEASE(signature));
-            defer(COM_RELEASE(error));
-
-            if ((hr = D3DX12SerializeVersionedRootSignature(
-                     &rootSignatureDesc, featureData.HighestVersion, &signature,
-                     &error)) == S_OK) {
-                (hr = gd->d3dDevice->CreateRootSignature(
-                     0, signature->GetBufferPointer(),
-                     signature->GetBufferSize(),
-                     IID_PPV_ARGS(&gd->computeRootSig)));
-            }
-            INIT_FAIL_CHECK();
+        // Determine supported root sig version.
+        D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
+        featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        if (FAILED(gd->d3dDevice->CheckFeatureSupport(
+                D3D12_FEATURE_ROOT_SIGNATURE, &featureData,
+                sizeof(featureData)))) {
+          featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
         }
-        // end compute root sig create.
 
-        // note that the blob is only temporary since it gets compiled into the
-        // pipeline obj.
-        ID3DBlob *computeShader = nullptr;
+        CD3DX12_DESCRIPTOR_RANGE1 ranges[2];
+        CD3DX12_ROOT_PARAMETER1 rootParameters[1];
 
-        const wchar_t *shaderFilePath = L"res\\shader.hlsl";
-        hr = ae::DX::compileShader(shaderFilePath, "copy_shader", "cs_5_0",
-                                   compileFlags, &computeShader);
+        ranges[0].Init(
+            D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+            2, // num descriptors.
+            0, // BaseShaderRegister: map to register(u0) in HLSL.
+            0, // RegisterSpace: map to register(u0, space0) in HLSL.
+            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE // descriptor static,
+            // data pointed to is
+            // not.
+        );
+
+        ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
+                       1, // num descriptors.
+                       0, // b0
+                       0, // space0
+                       D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+
+        rootParameters[0].InitAsDescriptorTable(2, ranges,
+                                                D3D12_SHADER_VISIBILITY_ALL);
+
+        CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+        rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters);
+
+        // TODO: could make a func called "serialize root sig".
+        ID3DBlob *signature;
+        ID3DBlob *error;
+        defer(COM_RELEASE(signature));
+        defer(COM_RELEASE(error));
+
+        if ((hr = D3DX12SerializeVersionedRootSignature(
+                 &rootSignatureDesc, featureData.HighestVersion, &signature,
+                 &error)) == S_OK) {
+          (hr = gd->d3dDevice->CreateRootSignature(
+               0, signature->GetBufferPointer(), signature->GetBufferSize(),
+               IID_PPV_ARGS(&gd->rootSig)));
+        }
         INIT_FAIL_CHECK();
+    }
+    // end compute root sig create.
+
+    // create compute pipeline state for postprocess
+    {
+        // note that the blob is only NEEDED temporary since it gets compiled
+        // into the pipeline obj.
+        IDxcBlob *computeShader = nullptr;
+        defer(COM_RELEASE(computeShader));
+
+        const char *shaderFilePath = "res\\shader.hlsl";
+        bool r = ae::DX::compileShader(shaderFilePath, L"copy_shader",
+                                       L"cs_6_0", &computeShader);
+        if (!r || !computeShader) {
+          // compileshader will print already.
+          return;
+        }
 
         D3D12_COMPUTE_PIPELINE_STATE_DESC computePipelineDesc = {};
-        computePipelineDesc.pRootSignature = gd->computeRootSig;
-        computePipelineDesc.CS = CD3DX12_SHADER_BYTECODE(computeShader);
+        computePipelineDesc.pRootSignature = gd->rootSig;
+        computePipelineDesc.CS = CD3DX12_SHADER_BYTECODE(
+            computeShader->GetBufferPointer(), computeShader->GetBufferSize());
 
         hr = (gd->d3dDevice->CreateComputePipelineState(
             &computePipelineDesc, IID_PPV_ARGS(&gd->computePipelineState)));
         INIT_FAIL_CHECK();
     }
-    
+
     // create the raytracing pipeline.
     {
-      // TODO: need to use shader model 6.3
     }
 
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
 
-    // create the textures for use as UAVs.
+    // create the resources + descriptors.
     {
+        size_t sceneBufferSize = ae::math::max(256ull,sizeof(dxr_world));
+
         // create the primary texture that sits in GPU memory for fast write.
         (hr = gd->d3dDevice->CreateCommittedResource(
              &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
@@ -650,44 +654,99 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         INIT_FAIL_CHECK();
 
         hr = gd->image->Map(0, NULL, nullptr);
-
-        INIT_FAIL_CHECK();
-    }
-
-    // create the UAV descriptor heap + descriptors.
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-        srvHeapDesc.NumDescriptors = 2;
-        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        (hr = gd->d3dDevice->CreateDescriptorHeap(&srvHeapDesc,
-                                                  IID_PPV_ARGS(&gd->srvHeap)));
         INIT_FAIL_CHECK();
 
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        // create the buffer for storing information about the scene.
+        {
+          D3D12_HEAP_PROPERTIES hPROP = {};
+          hPROP.Type = D3D12_HEAP_TYPE_CUSTOM;
 
-        CD3DX12_CPU_DESCRIPTOR_HANDLE uavHandle(
-            gd->srvHeap->GetCPUDescriptorHandleForHeapStart());
+          // TODO: we need to make this do the thing where we write to an upload buffer
+          // and record a copy for that to the GPU local memory.
+          hPROP.MemoryPoolPreference = D3D12_MEMORY_POOL_L0; // video RAM.
 
-        gd->d3dDevice->CreateUnorderedAccessView(
-            gd->uavTexture,
-            nullptr, // no counter.
-            &uavDesc,
-            uavHandle // where to write the descriptor.
-        );
+          // write combine causes CPU to write into a temp buffer,
+          // then to blast out the write to the real location later.
+          // TODO: my current suspicion is that the write goes once we unmap.
+          // or at least, that is our "guarantee" that the real write occurs
+          // before we use this buffer.
+          hPROP.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
 
-        int off = gd->d3dDevice->GetDescriptorHandleIncrementSize(
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        uavHandle.Offset(1, off);
+          (hr = gd->d3dDevice->CreateCommittedResource(
+               &hPROP, D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+               &CD3DX12_RESOURCE_DESC::Buffer(sceneBufferSize),
+               D3D12_RESOURCE_STATE_COMMON, /// initial access.
+               nullptr,                     // optimized clear.
+               IID_PPV_ARGS(&gd->sceneBuffer)));
+          INIT_FAIL_CHECK();
 
-        gd->d3dDevice->CreateUnorderedAccessView(
-            gd->image,
-            nullptr, // no counter.
-            &uavDesc,
-            uavHandle // where to write the descriptor.
-        );
+          // upload data to the buffer.
+          {
+                void *data;
+                constexpr D3D12_RANGE emptyReadRange = {0, 0};
+                gd->sceneBuffer->Map(0, &emptyReadRange, &data);
+
+                dxr_world w = {};
+                w.image.width = winInfo.width;
+                w.image.height = winInfo.height;
+                // TODO: need to write the materials + world objects here.
+                memset(data,0,sceneBufferSize);
+                memcpy(data, &w, sizeof(w));
+                
+
+                gd->sceneBuffer->Unmap(
+                    0,      // subres
+                    nullptr // entire subresource was modified.
+                );
+          }
+        }
+
+        // create the CBV_SRV_UAV descriptor heap + descriptors.
+        {
+          D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+          srvHeapDesc.NumDescriptors = 3;
+          srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+          srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+          (hr = gd->d3dDevice->CreateDescriptorHeap(
+               &srvHeapDesc, IID_PPV_ARGS(&gd->srvHeap)));
+          INIT_FAIL_CHECK();
+
+          D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+          uavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+          uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+          CD3DX12_CPU_DESCRIPTOR_HANDLE heapHandle(
+              gd->srvHeap->GetCPUDescriptorHandleForHeapStart());
+
+          gd->d3dDevice->CreateUnorderedAccessView(
+              gd->uavTexture,
+              nullptr, // no counter.
+              &uavDesc,
+              heapHandle // where to write the descriptor.
+          );
+
+          int off = gd->d3dDevice->GetDescriptorHandleIncrementSize(
+              D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+          heapHandle.Offset(1, off);
+
+          gd->d3dDevice->CreateUnorderedAccessView(
+              gd->image,
+              nullptr, // no counter.
+              &uavDesc,
+              heapHandle // where to write the descriptor.
+          );
+
+          heapHandle.Offset(1, off);
+
+          D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+          cbvDesc.BufferLocation = gd->sceneBuffer->GetGPUVirtualAddress();
+          cbvDesc.SizeInBytes = sceneBufferSize;
+
+          gd->d3dDevice->CreateConstantBufferView(
+              &cbvDesc,
+              heapHandle // where to write the descriptor.
+          );
+        }
     }
 
     // create what we need so that we can submit commands to the GPU.
@@ -725,7 +784,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         // here?
         cmd->SetPipelineState(
             gd->computePipelineState); // contains the monolithic shader.
-        cmd->SetComputeRootSignature(gd->computeRootSig);
+        cmd->SetComputeRootSignature(gd->rootSig);
 
         // bind heap and point the compute root sig to that heap.
         ID3D12DescriptorHeap *ppHeaps[] = {gd->srvHeap};
@@ -829,14 +888,15 @@ void automata_engine::Close(ae::game_memory_t *gameMemory) {
     COM_RELEASE(gd->commandAllocator);
 
     COM_RELEASE(gd->computePipelineState);
-    COM_RELEASE(gd->computeRootSig);
+    COM_RELEASE(gd->rootSig);
 
     COM_RELEASE(gd->srvHeap);
     COM_RELEASE(gd->uavTexture);
     COM_RELEASE(gd->image);
+    COM_RELEASE(gd->sceneBuffer);
 
     COM_RELEASE(gd->fence);
-    
+
     COM_RELEASE(gd->debugController);
     COM_RELEASE(gd->d3dDevice);
 }
