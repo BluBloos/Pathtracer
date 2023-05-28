@@ -50,7 +50,8 @@ struct image_t
   uint height;
 };
 
-cbuffer MyConstantBuffer : register(b0)
+// this is bound via a constant buffer view.
+cbuffer WorldConstantBuffer : register(b0)
 {
   // NOTE: for now, these are fixed size arrays for simplicity.
   material_t world_materials[1];
@@ -58,6 +59,12 @@ cbuffer MyConstantBuffer : register(b0)
   image_t    world_image;
 };
 
+// these are bound via constant root params.
+cbuffer TexelConstantBuffer : register(b0, space1)
+{
+    int texelX;
+    int texelY;
+};
 
 // raw buffer SRV.
 RaytracingAccelerationStructure MyScene : register(t0);
@@ -170,7 +177,7 @@ void ray_gen_shader()
   
   //  gpuTex[rayIndex.xy] = color;
     // TODO: we are big skeptic so for now just output green.
-  gpuTex[rayIndex.xy] = float4(0,1,0,1);
+  gpuTex[rayIndex.xy + float2(texelX,texelY) ] = float4(0,1,0,1);
 }
 
 

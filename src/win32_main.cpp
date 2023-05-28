@@ -451,6 +451,16 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
             cmd->SetDescriptorHeaps(1, &gd->descHeap);
             cmd->SetComputeRootDescriptorTable(
                 0, gd->descHeap->GetGPUDescriptorHandleForHeapStart());
+            struct {
+              int xPos;
+              int yPos;
+            } texelPos = {texel.xPos, texel.yPos};
+            cmd->SetComputeRoot32BitConstants(
+                                             1,//root param.
+                                             2, //num 32 bit vals to set.
+                                             &texelPos,
+                                             0 //offset.
+                                             );
         }
 
         // TODO: even if my thing is working right now, it's not working. I need
@@ -764,7 +774,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         }
 
         CD3DX12_DESCRIPTOR_RANGE1 ranges[3];
-        CD3DX12_ROOT_PARAMETER1 rootParameters[1];
+        CD3DX12_ROOT_PARAMETER1 rootParameters[2];
 
         ranges[0].Init(
             D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
@@ -791,6 +801,12 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         rootParameters[0].InitAsDescriptorTable(_countof(ranges), ranges,
                                                 D3D12_SHADER_VISIBILITY_ALL);
 
+        rootParameters[1].InitAsConstants(
+                                          2,//num constants.
+                                          0,//register.
+                                          1//space.
+                                          );
+        
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
         rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters);
 
