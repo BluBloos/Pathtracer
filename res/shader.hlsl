@@ -107,8 +107,10 @@ void ray_gen_shader()
   const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
 
   uint3 rayIndex=DispatchRaysIndex();
-  float x=rayIndex.x;
-  float y=rayIndex.y;
+
+  uint2 xy = rayIndex.xy + uint2(texelX,texelY);
+  float x = xy.x;
+  float y = xy.y;
   
   // 256 rays per pixel.
   const  int raysPerPixel=256;
@@ -139,7 +141,10 @@ void ray_gen_shader()
   float filmY = -1.0f + 2.0f * (float)y / (float)world_image.height;
   float filmX = -1.0f + 2.0f * (float)x / (float)world_image.width;
 
-  float4 color = float4(0,0,0,1);
+  float4 color = float4(0,0,0,
+                        //NOTE: we won't be accumulating in the alpha part of the color,
+                        // so default it to 0xFF
+                        1);
   float contrib = 1.0f / (float)raysPerPixel;
   const float filmDist=1;
   float3 filmCenter = cameraP - filmDist * cameraZ;
@@ -159,6 +164,8 @@ void ray_gen_shader()
     r.TMax=100;//TODO:
     r.TMin=0;
     MyPayload p;
+    p.color = float4(0,0,0,0);
+    p.attenuation = float4(1,1,1,1);
     TraceRay(
              MyScene,
              constRayFlags,
@@ -175,9 +182,9 @@ void ray_gen_shader()
 
   LinearToSRGB(color);
   
-  //  gpuTex[rayIndex.xy] = color;
+  gpuTex[ xy ] = color;
     // TODO: we are big skeptic so for now just output green.
-  gpuTex[rayIndex.xy + float2(texelX,texelY) ] = float4(0,1,0,1);
+  //gpuTex[rayIndex.xy + float2(texelX,texelY) ] = float4(0,1,0,1);
 }
 
 
@@ -189,7 +196,7 @@ void miss_main(inout MyPayload payload)
                           0,
                           float(0x82)/256.f,
                           float(0xF0)/256.f,
-                          float(0xFF)/256.f
+                          0
                           );
 }
 
