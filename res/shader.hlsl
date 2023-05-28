@@ -10,10 +10,7 @@ RWTexture2D<float4> cpuTex : register(u1); // maps to 1st UAV register.
 [numthreads(16, 16, 1)]
 void copy_shader(uint3 DTid : SV_DispatchThreadID)
 {	
-    //cpuTex[DTid.xy] = gpuTex.Load(DTid.xy);
-    // for now, we just output a pure red.	
-    cpuTex[DTid.xy] = float4(1.0, 0.0, 0.0, 1.0);
-
+    cpuTex[DTid.xy] = gpuTex.Load(DTid.xy);
     // swizzle the colors because our output surface expects so.
     cpuTex[DTid.xy].rgba = cpuTex[DTid.xy].bgra;
 }
@@ -42,7 +39,7 @@ struct material_t
 struct plane_t
 {
   float3 n;
-  float3 d;
+  float d;
   uint matIndex;
 };
 
@@ -64,30 +61,6 @@ cbuffer MyConstantBuffer : register(b0)
 
 // raw buffer SRV.
 RaytracingAccelerationStructure MyScene : register(t0);
-
-/*
-// TODO: 
-HitGroup my_group_name = 
-{ 
-  "intersection_main", 
-  "", 
-  "closesthit_main"
-};
-
-// NOTE: the payload and intersection shader attr are user defined structures.
-// TODO: 
-RaytracingShaderConfig shader_config_name = 
-{
-    maxPayloadSizeInBytes,
-    maxAttributeSizeInBytes
-};
-
-// TODO: 
-RaytracingPipelineConfig config_name = 
-{
-    8//maxTraceRecursionDepth
-};
-*/
 
 
 float RandomBilateral()
@@ -120,12 +93,12 @@ void LinearToSRGB(inout float4 L)
   LinearToSRGB(L.w);
 }
 
-// TODO: this is giving us an error or something like that;
-uint constRayFlags=         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
 
 [shader("raygeneration")]
 void ray_gen_shader()
 {
+  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
+
   uint3 rayIndex=DispatchRaysIndex();
   float x=rayIndex.x;
   float y=rayIndex.y;
@@ -159,7 +132,7 @@ void ray_gen_shader()
   float filmY = -1.0f + 2.0f * (float)y / (float)world_image.height;
   float filmX = -1.0f + 2.0f * (float)x / (float)world_image.width;
 
-  float4 color = float4(0,0,0,0);
+  float4 color = float4(0,0,0,1);
   float contrib = 1.0f / (float)raysPerPixel;
   const float filmDist=1;
   float3 filmCenter = cameraP - filmDist * cameraZ;
@@ -195,7 +168,9 @@ void ray_gen_shader()
 
   LinearToSRGB(color);
   
-  gpuTex[rayIndex.xy] = color;
+  //  gpuTex[rayIndex.xy] = color;
+    // TODO: we are big skeptic so for now just output green.
+  gpuTex[rayIndex.xy] = float4(0,1,0,1);
 }
 
 
@@ -203,16 +178,22 @@ void ray_gen_shader()
 void miss_main(inout MyPayload payload)
 {
   //TODO: need to factor in the attenuation.
-  payload.color += float4(0,0x82,0xF0,0xFF);
+  payload.color += float4(
+                          0,
+                          float(0x82)/256.f,
+                          float(0xF0)/256.f,
+                          float(0xFF)/256.f
+                          );
 }
 
-/* 
 
 //TODO: we'll also want the sphere intersection idea.
 [shader("intersection")]
 void intersection_plane()
 {
   const float tolerance = 0.0001f;
+
+  //TODO: seems we might want to use Tmin or something here.
   const   float minHitDistance = 0.001f;
 
   uint id = InstanceID(); //user provided value for instance id of blas in tlas.
@@ -226,8 +207,6 @@ void intersection_plane()
 
   bool hit =false;
 
-  //TODO: need to get a const buffer bound that is "world" below.
-  //TODO: also need to define plane_t.
   
   // check hit.
   plane_t plane = world_planes[id];
@@ -235,7 +214,12 @@ void intersection_plane()
   if ((denom < -tolerance) || (denom > tolerance))
     {
       float t = (-plane.d - dot(plane.n, rayOrigin)) / denom;
-      if ((t > minHitDistance) && (t < hitDistance))
+      if ((t > minHitDistance)
+          //NOTE: so I'm getting rid of this condition because it seems super
+          // odd for us to not mark the hit if this ray was larger than the last
+          // (where this logic is from CPU side app).
+          //&& (t < hitDistance)
+          )
         {
           attr.hitDistance = t;
           attr.hitMatIndex = plane.matIndex;
@@ -246,12 +230,11 @@ void intersection_plane()
   
   if(hit)
     ReportHit(
-              attr.hitDistance//THit
+              attr.hitDistance,//THit
               0, //hitkind
               attr);
   
 }
-*/
 
  /*
 [shader("closesthit")]

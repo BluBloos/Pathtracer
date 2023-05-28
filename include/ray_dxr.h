@@ -7,7 +7,7 @@ struct dxr_material_t {
 
 struct dxr_plane_t {
   float n[3];
-  float d[3];
+  float d;
   unsigned int matIndex;
 };
 
@@ -18,7 +18,7 @@ struct dxr_image_t {
 
 // NOTE: for now, these are fixed size arrays for simplicity.
 struct dxr_world {
-  material_t materials[1];
-  plane_t planes[1];
+  dxr_material_t materials[1];
+  dxr_plane_t planes[1];
   dxr_image_t image;
 };
