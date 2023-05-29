@@ -107,12 +107,16 @@ struct game_data {
   // resources.
   ID3D12Resource *gpuTex = NULL;
   ID3D12Resource *cpuTex = NULL;
+
+  // stuff for raytracing.
   ID3D12Resource *sceneBuffer = NULL;
   ID3D12Resource *rayShaderTable = NULL;
   ID3D12Resource *tlas = NULL;
   ID3D12Resource *blas = NULL; // plane
   // TODO: add sphere blas.
-  ID3D12Resource *scratch = NULL;
+
+  ID3D12Resource *tlasScratch = NULL;
+  ID3D12Resource *blasScratch = NULL;
 
   ID3D12Resource *AABBs = NULL;
   ID3D12Resource *tlasInstances = NULL;
@@ -350,8 +354,8 @@ void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw,
 void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
     ae::defaultWindowName = "Raytracer";
-    ae::defaultWidth = 300;
-    ae::defaultHeight = 300;
+    ae::defaultWidth  = 1280;
+    ae::defaultHeight = 720;
 }
 
 typedef struct texel {
@@ -445,22 +449,29 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
         rayDesc.Depth = 1;
 
         // bind the other crap so the shaders actually know where to get the
-        // resources, etc.
+        // resources, etc. bind tlas too.
         {
             cmd->SetComputeRootSignature(gd->rootSig);
             cmd->SetDescriptorHeaps(1, &gd->descHeap);
             cmd->SetComputeRootDescriptorTable(
                 0, gd->descHeap->GetGPUDescriptorHandleForHeapStart());
             struct {
-              int xPos;
-              int yPos;
-            } texelPos = {texel.xPos, texel.yPos};
+              unsigned int xPos;
+              unsigned int yPos;
+              unsigned int seed;
+              unsigned int width;
+              unsigned int height;
+            } constants = {texel.xPos, texel.yPos,
+                           (unsigned int)(ae::timing::epoch()),
+                           image.width, image.height
+            };
             cmd->SetComputeRoot32BitConstants(
-                                             1,//root param.
-                                             2, //num 32 bit vals to set.
-                                             &texelPos,
-                                             0 //offset.
+                                             1, //root param.
+                                             5, //num 32 bit vals to set.
+                                             &constants,
+                                             0  //offset.
                                              );
+            cmd->SetComputeRootShaderResourceView(2, gd->tlas->GetGPUVirtualAddress());
         }
 
         // TODO: even if my thing is working right now, it's not working. I need
@@ -490,7 +501,14 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                 throw;
             WaitForSingleObjectEx(gd->rayFenceEvents[tIdx], INFINITE, FALSE);
 
-            Sleep(500); // TODO: this is a BIG hack.
+            // TODO: this solves some "cmd list allocator reset" ideas.
+            // but also, if I just let those happen, the app still goes to completion and I get
+            // the raytraced image.
+            //
+            // so, there seems to be some funny business going on. we should definitely investigate
+            // that!
+            //
+            //Sleep(500); 
         }
 
         // reset list and allocators.
@@ -726,6 +744,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     HRESULT hr;
 #define INIT_FAIL_CHECK()                                                      \
   if (hr != S_OK) {                                                            \
+    AELoggerError("INIT_FAIL_CHECK failed at line=%d with hr=%x", __LINE__,    \
+                  hr);                                                         \
     return;                                                                    \
   }
 
@@ -773,8 +793,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
           featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
         }
 
-        CD3DX12_DESCRIPTOR_RANGE1 ranges[3];
-        CD3DX12_ROOT_PARAMETER1 rootParameters[2];
+        CD3DX12_DESCRIPTOR_RANGE1 ranges[2];
+        CD3DX12_ROOT_PARAMETER1 rootParameters[3];
 
         ranges[0].Init(
             D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
@@ -792,21 +812,20 @@ void automata_engine::Init(game_memory_t *gameMemory) {
                        0, // space0
                        D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
 
-        ranges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-                       1, // num descriptors.
-                       0, // t0
-                       0, // space0
-                       D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
-
         rootParameters[0].InitAsDescriptorTable(_countof(ranges), ranges,
                                                 D3D12_SHADER_VISIBILITY_ALL);
 
         rootParameters[1].InitAsConstants(
-                                          2,//num constants.
+                                          5,//num constants.
                                           0,//register.
                                           1//space.
                                           );
-        
+
+        rootParameters[2].InitAsShaderResourceView(
+                                                   0,//register
+                                                   0 //space.
+                                                   );
+                
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
         rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters);
 
@@ -1069,61 +1088,28 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     {
         auto device = getRayDevice(gd->d3dDevice);
 
-        // init top level pre build info and other stuffs.
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS topLevelInputs =
-            {};
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO
-            topLevelPrebuildInfo = {};
+        // scene infos.
+        constexpr auto AABBcount = 1u;
         constexpr auto tlasInstanceCount = 1u;
-        {
-          topLevelInputs.Type =
-              D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-          topLevelInputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-          topLevelInputs.NumDescs = tlasInstanceCount;
 
-          // NOTE: I'm not quite sure what required information we need for the
-          // prebuild info. but going from the sample, seems this is the right
-          // idea?
-          device->GetRaytracingAccelerationStructurePrebuildInfo(
-              &topLevelInputs, &topLevelPrebuildInfo);
-        }
-
-        // init bottom level pre build info and other stuffs.
+        // we begin by making all the BLASes.
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bottomLevelInputs =
             {};
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO
-            bottomLevelPrebuildInfo = {};
+        D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {};
         {
-
-          // begin by uploading blas entries to GPU.
-          constexpr auto AABBcount = 1u;
+          // upload aabbs.
           {
                 size_t AABBsSize = ae::math::align_up(
                     sizeof(D3D12_RAYTRACING_AABB) * AABBcount,
                     D3D12_RAYTRACING_AABB_BYTE_ALIGNMENT);
 
-                (hr = gd->d3dDevice->CreateCommittedResource(
-                     &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-                     D3D12_HEAP_FLAG_NONE,
-                     &CD3DX12_RESOURCE_DESC::Buffer(
-                         AABBsSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-                     D3D12_RESOURCE_STATE_COPY_DEST,
-                     nullptr, // optimized clear.
-                     IID_PPV_ARGS(&gd->AABBs)));
-                INIT_FAIL_CHECK();
-
                 void *data;
-                uBuffer.curr().src =
+                gd->AABBs =
                     ae::DX::AllocUploadBuffer(gd->d3dDevice, AABBsSize, &data);
-                uBuffer.curr().size = AABBsSize;
-                uBuffer.curr().dst = gd->AABBs;
-                uBuffer.curr().initState =
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
                 if (data) {
                     memset(data, 0, AABBsSize);
-                    D3D12_RAYTRACING_AABB aabb;
-
+                    D3D12_RAYTRACING_AABB aabb = {};
                     // TODO: make this a legit aabb.
                     //  like, use the plane for the scene.
                     aabb.MinX = -1;
@@ -1137,120 +1123,152 @@ void automata_engine::Init(game_memory_t *gameMemory) {
                     AELoggerLog("oops");
                 }
 
-                uBuffer.curr().src->Unmap(0,
-                                          nullptr // entire subres modified.
+                gd->AABBs->Unmap(0,
+                                 nullptr // entire subres modified.
                 );
-                uBuffer.iter();
           }
 
-          D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {};
-          geometryDesc.Type =
-              D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
-          geometryDesc.AABBs.AABBCount = AABBcount;
-          geometryDesc.AABBs.AABBs = {gd->AABBs->GetGPUVirtualAddress(),
-                                      D3D12_RAYTRACING_AABB_BYTE_ALIGNMENT};
+          // create geometries from aabbs.
+          {
+                geometryDesc.Type =
+                    D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+                geometryDesc.AABBs.AABBCount = AABBcount;
 
-          bottomLevelInputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-          bottomLevelInputs.Type =
-              D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-          bottomLevelInputs.pGeometryDescs =
-              &geometryDesc; // 1 geometry def to which instances can be made.
+                geometryDesc.AABBs.AABBs = {gd->AABBs->GetGPUVirtualAddress(),
+                                            // TODO: is this the right one?
+                                            sizeof(D3D12_RAYTRACING_AABB)};
+          }
 
-          device->GetRaytracingAccelerationStructurePrebuildInfo(
-              &bottomLevelInputs, &bottomLevelPrebuildInfo);
-        }
+          // get prebuild info.
+          D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO
+          bottomLevelPrebuildInfo = {};
+          {
+                bottomLevelInputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+                bottomLevelInputs.Type =
+                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+                bottomLevelInputs.NumDescs = 1;
+                bottomLevelInputs.pGeometryDescs =
+                    &geometryDesc; // 1 geometry def to which instances can be
+                                   // made.
 
-        // create the tlas and blas GPU resources using the bottom/top accel
-        // info.
-        (hr = gd->d3dDevice->CreateCommittedResource(
-             &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-             D3D12_HEAP_FLAG_NONE,
-             &CD3DX12_RESOURCE_DESC::Buffer(
-                 topLevelPrebuildInfo.ResultDataMaxSizeInBytes,
-                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
-             nullptr, // optimized clear.
-             IID_PPV_ARGS(&gd->tlas)));
-        INIT_FAIL_CHECK();
+                device->GetRaytracingAccelerationStructurePrebuildInfo(
+                    &bottomLevelInputs, &bottomLevelPrebuildInfo);
+          }
 
-        (hr = gd->d3dDevice->CreateCommittedResource(
-             &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-             D3D12_HEAP_FLAG_NONE,
-             &CD3DX12_RESOURCE_DESC::Buffer(
-                 bottomLevelPrebuildInfo.ResultDataMaxSizeInBytes,
-                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
-             nullptr, // optimized clear.
-             IID_PPV_ARGS(&gd->blas)));
-        INIT_FAIL_CHECK();
-
-        // instantiate an instance of the blas in tlas.
-        {
-          D3D12_RAYTRACING_INSTANCE_DESC instanceDesc = {};
-
-          size_t bSize = sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
-
-          // TODO: do the transform thing.
-          // for now we are just doing identity matrix.
-          instanceDesc.Transform[0][0] = instanceDesc.Transform[1][1] =
-              instanceDesc.Transform[2][2] = 1;
-
-          // TODO: we'll also need to set the instance ID. for now, leave as 0.
-
-          instanceDesc.InstanceMask = 0xFF;
-          instanceDesc.AccelerationStructure = gd->blas->GetGPUVirtualAddress();
-
+          // create blas.
           (hr = gd->d3dDevice->CreateCommittedResource(
                &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
                D3D12_HEAP_FLAG_NONE,
                &CD3DX12_RESOURCE_DESC::Buffer(
-                   bSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-               D3D12_RESOURCE_STATE_COPY_DEST,
+                   bottomLevelPrebuildInfo.ResultDataMaxSizeInBytes,
+                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+               D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
                nullptr, // optimized clear.
-               IID_PPV_ARGS(&gd->tlasInstances)));
+               IID_PPV_ARGS(&gd->blas)));
           INIT_FAIL_CHECK();
 
-          void *data;
-          uBuffer.curr().src =
-              ae::DX::AllocUploadBuffer(gd->d3dDevice, bSize, &data);
-          uBuffer.curr().size = bSize;
-          uBuffer.curr().dst = gd->tlasInstances;
-          uBuffer.curr().initState =
-              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+          // create scratch.
+          UINT64 scratchSize = bottomLevelPrebuildInfo.ScratchDataSizeInBytes;
+          (hr = gd->d3dDevice->CreateCommittedResource(
+               &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+               D3D12_HEAP_FLAG_NONE,
+               &CD3DX12_RESOURCE_DESC::Buffer(
+                   scratchSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+               nullptr, // optimized clear.
+               IID_PPV_ARGS(&gd->blasScratch)));
+          INIT_FAIL_CHECK();
+        }
+        // END blas construction.
+        // NOTE: we initially had some issues getting this to work. what were
+        // the fixes??? this went as:
+        // - seeing that not init geo descriptions (didn't give the number of
+        // them).
+        // - and that those had to exist (the array is not null) when init the
+        // prebuild info. this indicates the data had to be valid on the GPU, afaik.
 
-          if (data) {
-                // memset(data, 0 ,bSize);
-                memcpy(data, &instanceDesc, bSize);
-          } else {
-                AELoggerLog("oops");
+        // create the TLAS.
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS topLevelInputs =
+            {};
+        {
+          // get prebuild info.
+          D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO
+          topLevelPrebuildInfo = {};
+          {
+                topLevelInputs.Type =
+                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+                topLevelInputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+                topLevelInputs.NumDescs = tlasInstanceCount;
+
+                device->GetRaytracingAccelerationStructurePrebuildInfo(
+                    &topLevelInputs, &topLevelPrebuildInfo);
           }
 
-          uBuffer.curr().src->Unmap(0,
-                                    nullptr // entire subres modified.
-          );
-          uBuffer.iter();
+          // alloc tlas.
+          (hr = gd->d3dDevice->CreateCommittedResource(
+               &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+               D3D12_HEAP_FLAG_NONE,
+               &CD3DX12_RESOURCE_DESC::Buffer(
+                   topLevelPrebuildInfo.ResultDataMaxSizeInBytes,
+                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+               D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+               nullptr, // optimized clear.
+               IID_PPV_ARGS(&gd->tlas)));
+          INIT_FAIL_CHECK();
+
+          // instantiate an instance of the blas in tlas.
+          {
+                size_t bSize = sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+
+                D3D12_RAYTRACING_INSTANCE_DESC instanceDesc = {};
+                // TODO: use the actual data about the plane to inform the
+                // transformation matrix.
+                instanceDesc.Transform[0][0] = instanceDesc.Transform[1][1] =
+                    instanceDesc.Transform[2][2] = 1;
+                // NOTE: we are set the instance ID to 0.
+                instanceDesc.InstanceMask =
+                    0xFF; // bitwise OR and if zero, ignore.
+                instanceDesc.AccelerationStructure =
+                    gd->blas->GetGPUVirtualAddress();
+
+                void *data;
+                gd->tlasInstances =
+                    ae::DX::AllocUploadBuffer(gd->d3dDevice, bSize, &data);
+
+                if (data) {
+                    memcpy(data, &instanceDesc, bSize);
+                } else {
+                    AELoggerLog("oops");
+                }
+
+                gd->tlasInstances->Unmap(0,
+                                         nullptr // entire subres modified.
+                );
+          }
+
+          // create the required scratch buffer.
+          UINT64 scratchSize = topLevelPrebuildInfo.ScratchDataSizeInBytes;
+
+          // TODO: creating a buffer with default args like this might be
+          // something common that we want to pull out into AE.
+          (hr = gd->d3dDevice->CreateCommittedResource(
+               &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+               D3D12_HEAP_FLAG_NONE,
+               &CD3DX12_RESOURCE_DESC::Buffer(
+                   scratchSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+               nullptr, // optimized clear.
+               IID_PPV_ARGS(&gd->tlasScratch)));
+          INIT_FAIL_CHECK();
         }
-
-        uBuffer.flush(
-            gd); // record uploads of geometry and instance data to cmd list.
-        // so that the subsequent recording of building the acceleration
-        // structure has access to the post-copy data.
-        // NOTE: A small note on this approach is that
-
-        // create the required scratch buffer.
-        UINT64 scratchSize =
-            ae::math::max(topLevelPrebuildInfo.ScratchDataSizeInBytes,
-                          bottomLevelPrebuildInfo.ScratchDataSizeInBytes) +
-            256; // 256 for additional padding, why not.
-        (hr = gd->d3dDevice->CreateCommittedResource(
-             &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-             D3D12_HEAP_FLAG_NONE,
-             &CD3DX12_RESOURCE_DESC::Buffer(
-                 scratchSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-             nullptr, // optimized clear.
-             IID_PPV_ARGS(&gd->scratch)));
-        INIT_FAIL_CHECK();
+        // END tlas construction.
+        //
+        // NOTE: there were some issues getting this to work in the first place.
+        // fixes?
+        // - we saw that we were reuse the same scratch buffer as was used
+        // to init the BLAS. maybe it is the case
+        // that newly alloc scratch buffers are zero, and the hidden
+        // acceleration structure impl relies on that.
 
         auto cmd = getRayCmdList(gd->commandList);
 
@@ -1260,7 +1278,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         {
           bottomLevelBuildDesc.Inputs = bottomLevelInputs;
           bottomLevelBuildDesc.ScratchAccelerationStructureData =
-              gd->scratch->GetGPUVirtualAddress();
+              gd->blasScratch->GetGPUVirtualAddress();
           bottomLevelBuildDesc.DestAccelerationStructureData =
               gd->blas->GetGPUVirtualAddress();
         }
@@ -1275,7 +1293,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
           topLevelBuildDesc.DestAccelerationStructureData =
               gd->tlas->GetGPUVirtualAddress();
           topLevelBuildDesc.ScratchAccelerationStructureData =
-              gd->scratch->GetGPUVirtualAddress();
+              gd->tlasScratch->GetGPUVirtualAddress();
         }
 
         // record the building.
@@ -1285,8 +1303,10 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         cmd->BuildRaytracingAccelerationStructure(&topLevelBuildDesc, 0,
                                                   nullptr);
     }
+    //
     // END the ray tracing acceleration structure stuff.
-
+    //
+    
     // create the resources + descriptors.
     {
         // create the primary texture that sits in GPU memory for fast write.
@@ -1353,7 +1373,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
                     w.image.width = winInfo.width;
                     w.image.height = winInfo.height;
                     w.planes[0].d = 0;
-                    w.planes[0].n[2] = 1;
+                    // plane is pointing straight up!
+                    w.planes[0].n[1] = 1; // this gives something that is NOT 0x1, since it is a float.
                     w.planes[0].matIndex = 1;
 
                     // TODO: need to write the materials + world objects here.
@@ -1423,6 +1444,11 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
           heapHandle.Offset(1, off);
 
+          //TODO: there is no longer a need to be writing this descriptor.
+          //      alternatively, we could go back to this approach instead of setting it
+          //      in the root parameter. that approach was valid but we did not see the fruits
+          //      since lots of other things were incorrect.
+          //
           // create the scene accel structure descriptor.
           D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
           srvDesc.Shader4ComponentMapping =

@@ -38,17 +38,11 @@ struct material_t
 
 struct plane_t
 {
-  float3 n;
   float d;
   uint matIndex;
+  float3 n; // starts on next float4 boundary.
 };
 
-
-struct image_t
-{
-  uint width;
-  uint height;
-};
 
 // this is bound via a constant buffer view.
 cbuffer WorldConstantBuffer : register(b0)
@@ -56,7 +50,6 @@ cbuffer WorldConstantBuffer : register(b0)
   // NOTE: for now, these are fixed size arrays for simplicity.
   material_t world_materials[1];
   plane_t    world_planes[1];
-  image_t    world_image;
 };
 
 // these are bound via constant root params.
@@ -64,18 +57,25 @@ cbuffer TexelConstantBuffer : register(b0, space1)
 {
     int texelX;
     int texelY;
+    int randSeed;
+    uint image_width;
+    uint image_height;
 };
 
 // raw buffer SRV.
 RaytracingAccelerationStructure MyScene : register(t0);
 
 
-float RandomBilateral()
+float RandomUnilateral(uint2 n)
 {
-  //TODO: 
-  return 0;
- //  return noise(0);
+  return frac(sin(dot(randSeed*n, float2(12.9898, 4.1414))) * 43758.5453);
 }
+
+float RandomBilateral(uint2 n)//-1 -> 1
+{
+  return 2.f*(RandomUnilateral(n)-0.5f);
+}
+
 
 // some magic sauce. TODO: this can be much better anyways.
 void LinearToSRGB(inout float L)
@@ -104,7 +104,12 @@ void LinearToSRGB(inout float4 L)
 [shader("raygeneration")]
 void ray_gen_shader()
 {
-  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
+  // TODO: for now we are using these flags to "cull the miss shader" as the DXR docs put it.
+  // this should visually result in the silhouttes of objects.
+  //
+  //  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
+  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+
 
   uint3 rayIndex=DispatchRaysIndex();
 
@@ -115,49 +120,57 @@ void ray_gen_shader()
   // 256 rays per pixel.
   const  int raysPerPixel=256;
 
-  const float3  cameraP = float3(0, -10, 1); // go back 10 and up 1
-
-  const float3 cameraZ = normalize(cameraP);
-  const float3  cameraX = normalize(cross(float3(0,0,1), cameraZ));
-  const float3 cameraY = normalize(cross(cameraZ, cameraX));
 
   // TODO: there is a bunch of crap here that can move to CPU side
   // compute, or that are constants and only need to be compute once.
+  
 
-  float halfPixW = 1.0f / world_image.width;
-  float halfPixH = 1.0f / world_image.height;
+  // NOTE: the rays shoot at the film, from cameraP. the film is away from cameraP in -cameraZ dir.
+  // therefore, rays are shooting towards (0,0,0).
+  const float3 cameraP = float3(10, 10, 10); // put the camera in a place.
+  const float3 cameraZ = normalize(cameraP); // away from (0,0,0).
+  const float3 cameraX = normalize(cross(float3(0,1,0), cameraZ));
+  const float3 cameraY = normalize(cross(cameraZ, cameraX));
 
+
+
+  float halfPixW = 1.0f / image_width;
+  float halfPixH = 1.0f / image_height;
+
+  // compute the physical film dimensions.
   float filmH = 1;
   float filmW = 1;
-  if (world_image.width > world_image.height) {
-    filmH = filmW * (float)world_image.height / (float)world_image.width;
-  } else if (world_image.height > world_image.width) {
-    filmW = filmH * (float)world_image.width / (float)world_image.height;
+  if (image_width > image_height) {
+    filmH = filmW * (float)image_height / (float)image_width;
+  } else if (image_height > image_width) {
+    filmW = filmH * (float)image_width / (float)image_height;
   }
-
   float halfFilmW = filmW / 2.0f;
   float halfFilmH = filmH / 2.0f;
 
-  float filmY = -1.0f + 2.0f * (float)y / (float)world_image.height;
-  float filmX = -1.0f + 2.0f * (float)x / (float)world_image.width;
+  // compute physical location of pixel on the film, normalized to -1 -> 1.
+  float filmY = -1.0f + 2.0f * y / (float)image_height;
+  float filmX = -1.0f + 2.0f * x / (float)image_width;
+
+
+  const float filmDist = 1;
+  float3 filmCenter = cameraP - filmDist * cameraZ;
+
 
   float4 color = float4(0,0,0,
                         //NOTE: we won't be accumulating in the alpha part of the color,
                         // so default it to 0xFF
                         1);
   float contrib = 1.0f / (float)raysPerPixel;
-  const float filmDist=1;
-  float3 filmCenter = cameraP - filmDist * cameraZ;
-
+  
   for (int i = 0; i < raysPerPixel; i++) {
 
-    float offX = filmX + (RandomBilateral() * halfPixW);
-    float offY = filmY + (RandomBilateral() * halfPixH);
+    float offX = filmX + (RandomBilateral(xy) * halfPixW);
+    float offY = filmY + (RandomBilateral(xy) * halfPixH);
     float3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
     float3 rayOrigin = cameraP;
     float3 rayDirection = normalize(filmP - cameraP);
 
-    //    RayCast(&world, rayOrigin, rayDirection);
     RayDesc r;
     r.Origin=rayOrigin;
     r.Direction=rayDirection;
@@ -169,22 +182,24 @@ void ray_gen_shader()
     TraceRay(
              MyScene,
              constRayFlags,
+
              0xFF, //8 bit InstanceMask.
+             // NOTE: this is just where this guy & the mask on the actual tlas instance must be nonzero,
+             // then we don't ignore.
+             //
              //NOTE: the only thing that contributes to the hit group should be what instance it is.
              0,//RayContributionToHitGroupIndex
              0,//MultiplierForGeometryContributionToShaderIndex
              0, // MissShaderIndex, NOTE: here we use index for the single miss shader that we have.
              r, p
              );
-
+    // TODO: shouldn't we just let things accumulate in HDR space??
     color = color + contrib * p.color;
   }
 
   LinearToSRGB(color);
   
   gpuTex[ xy ] = color;
-    // TODO: we are big skeptic so for now just output green.
-  //gpuTex[rayIndex.xy + float2(texelX,texelY) ] = float4(0,1,0,1);
 }
 
 
@@ -231,7 +246,7 @@ void intersection_plane()
       if ((t > minHitDistance)
           //NOTE: so I'm getting rid of this condition because it seems super
           // odd for us to not mark the hit if this ray was larger than the last
-          // (where this logic is from CPU side app).
+          // (where this logic was copy pasta from CPU side app).
           //&& (t < hitDistance)
           )
         {
@@ -244,7 +259,7 @@ void intersection_plane()
   
   if(hit)
     ReportHit(
-              attr.hitDistance,//THit
+              attr.hitDistance, // new THit
               0, //hitkind
               attr);
   
