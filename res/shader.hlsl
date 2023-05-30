@@ -18,38 +18,56 @@ void copy_shader(uint3 DTid : SV_DispatchThreadID)
 
 struct MyPayload
 {
-  float4 color;
-  float4 attenuation;
+  float3 color;
+  float3 attenuation;
+  uint currBounce;
 };
 
 struct MyAttributes
 {
-  float hitDistance;
   float3 nextNormal;
   uint hitMatIndex;
 };
 
 struct material_t
 {
-  float4 emitColor;
-  float4 scatter;
-  float4 refColor;
+  float3 emitColor;
+  float scatter;
+  float3 refColor;
+  int padding;
 };
 
 struct plane_t
 {
   float d;
   uint matIndex;
-  float3 n; // starts on next float4 boundary.
+  float2 padding;
+  float3 n;
+  float padding2;
+};
+
+struct sphere_t
+{
+  float r;
+  unsigned int matIndex;
+  float2 padding;
+};
+
+struct random_pair_t
+{
+  float2 rand;
+  float2 padding;
 };
 
 
 // this is bound via a constant buffer view.
 cbuffer WorldConstantBuffer : register(b0)
 {
-  // NOTE: for now, these are fixed size arrays for simplicity.
-  material_t world_materials[1];
-  plane_t    world_planes[1];
+  // TODO: we want to pull this constant 10 from somewhere common.
+  material_t world_materials[10];
+  plane_t    world_planes[10];
+  sphere_t   world_spheres[10];
+  random_pair_t     rands[256]; 
 };
 
 // these are bound via constant root params.
@@ -83,33 +101,31 @@ void LinearToSRGB(inout float L)
   if (L < 0.0f) {
         L = 0.0f;
     } 
-    if (L > 1.0f) {
+  // TODO: shouldn't we just let things accumulate in HDR space??
+  // it looks like currently our accumulation can go over 1,
+  // then we just clamp that .... losing all information!?
+  // I think maybe we need to do some sort of tonemapping from HDR to linear.
+  if (L > 1.0f) {
         L = 1.0f;
     }
-    float S = L * 12.92f;
-    if (L > 0.0031308f) {
-        S = 1.055f * pow(L, 1.0f/2.4f) - 0.055f;
-    }
-    L=S;
+  float S = L * 12.92f;
+  if (L > 0.0031308f) {
+    S = 1.055f * pow(L, 1.0f/2.4f) - 0.055f;
+  }
+  L=S;
 }
-void LinearToSRGB(inout float4 L)
+void LinearToSRGB(inout float3 L)
 {
   LinearToSRGB(L.x);
   LinearToSRGB(L.y);
   LinearToSRGB(L.z);
-  LinearToSRGB(L.w);
 }
 
 
 [shader("raygeneration")]
 void ray_gen_shader()
 {
-  // TODO: for now we are using these flags to "cull the miss shader" as the DXR docs put it.
-  // this should visually result in the silhouttes of objects.
-  //
-  //  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_TRIANGLES;
-  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
-
+  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE;
 
   uint3 rayIndex=DispatchRaysIndex();
 
@@ -127,7 +143,7 @@ void ray_gen_shader()
 
   // NOTE: the rays shoot at the film, from cameraP. the film is away from cameraP in -cameraZ dir.
   // therefore, rays are shooting towards (0,0,0).
-  const float3 cameraP = float3(10, 10, 10); // put the camera in a place.
+  const float3 cameraP = float3(0, 1, -10); // put the camera in a place.
   const float3 cameraZ = normalize(cameraP); // away from (0,0,0).
   const float3 cameraX = normalize(cross(float3(0,1,0), cameraZ));
   const float3 cameraY = normalize(cross(cameraZ, cameraX));
@@ -157,16 +173,14 @@ void ray_gen_shader()
   float3 filmCenter = cameraP - filmDist * cameraZ;
 
 
-  float4 color = float4(0,0,0,
-                        //NOTE: we won't be accumulating in the alpha part of the color,
-                        // so default it to 0xFF
-                        1);
+  float3 color = float3(0,0,0);
+
   float contrib = 1.0f / (float)raysPerPixel;
   
   for (int i = 0; i < raysPerPixel; i++) {
 
-    float offX = filmX + (RandomBilateral(xy) * halfPixW);
-    float offY = filmY + (RandomBilateral(xy) * halfPixH);
+    float offX = filmX + (rands[i].rand.x * halfPixW);
+    float offY = filmY + (rands[i].rand.y * halfPixH);
     float3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
     float3 rayOrigin = cameraP;
     float3 rayDirection = normalize(filmP - cameraP);
@@ -177,8 +191,9 @@ void ray_gen_shader()
     r.TMax=100;//TODO:
     r.TMin=0;
     MyPayload p;
-    p.color = float4(0,0,0,0);
-    p.attenuation = float4(1,1,1,1);
+    p.color = float3(0,0,0);
+    p.attenuation = float3(1,1,1);
+    p.currBounce=0;
     TraceRay(
              MyScene,
              constRayFlags,
@@ -193,30 +208,82 @@ void ray_gen_shader()
              0, // MissShaderIndex, NOTE: here we use index for the single miss shader that we have.
              r, p
              );
-    // TODO: shouldn't we just let things accumulate in HDR space??
     color = color + contrib * p.color;
   }
 
   LinearToSRGB(color);
-  
-  gpuTex[ xy ] = color;
+
+//NOTE: we won't be accumulating in the alpha part of the color,
+// so default it to 0xFF
+  gpuTex[ xy ] = float4(color,1);
 }
 
 
 [shader("miss")]
 void miss_main(inout MyPayload payload)
 {
-  //TODO: need to factor in the attenuation.
-  payload.color += float4(
+  payload.color += float3(
                           0,
                           float(0x82)/256.f,
-                          float(0xF0)/256.f,
-                          0
-                          );
+                          float(0xF0)/256.f
+                          ) * payload.attenuation;
+}
+
+[shader("intersection")]
+void intersection_sphere()
+{
+
+  //TODO: seems we might want to use Tmin or something here.
+  const   float minHitDistance = 0.001f;
+  const float tolerance = 0.0001f;
+
+  uint id = InstanceID(); //user provided value for instance id of blas in tlas.
+
+  MyAttributes attr;//user defined attribute for the hit.
+  
+  sphere_t sphere = world_spheres[id];
+
+  //  float3 sphereRelativeRayOrigin = rayOrigin - sphere.p;
+  float3 sphereRelativeRayOrigin = ObjectRayOrigin();
+  float3 rayDirection = WorldRayDirection();
+ 
+  float a = dot(rayDirection, rayDirection);
+  float b = 2.0f * dot(sphereRelativeRayOrigin, rayDirection);
+  float c = dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
+    - sphere.r * sphere.r;
+  float denom = 2.0f * a;
+  float rootTerm = sqrt(b * b - 4.0f * a * c);
+  
+  if (rootTerm > tolerance) {
+    // NOTE(Noah): The denominator can never be zero.
+    // that is, so long as rayDir is non-zero, but how ridiculous would it be if it was!??
+    float tp = (-b + rootTerm) / denom;
+    float tn = (-b - rootTerm) / denom;   
+    float t = tp;
+    if ((tn > minHitDistance) && (tn < tp)){
+      t = tn;
+    }
+    if ((t > minHitDistance)
+        //NOTE: this condition is copy pasta from the CPU side app.
+          // it is there because we need to compare the curr object to the current Tmax,
+          // to ensure that we are looking at the closest hit.
+          // however, dxr has us covered in this case.
+          //&& (t < hitDistance)
+        ) {
+      attr.hitMatIndex = sphere.matIndex;
+      attr.nextNormal = normalize(t*rayDirection + sphereRelativeRayOrigin);
+
+  ReportHit(
+             t, // new THit
+              0, //hitkind
+              attr);
+    }
+  }
+
 }
 
 
-//TODO: we'll also want the sphere intersection idea.
+
 [shader("intersection")]
 void intersection_plane()
 {
@@ -234,8 +301,6 @@ void intersection_plane()
   
   MyAttributes attr;//user defined attribute for the hit.
 
-  bool hit =false;
-
   
   // check hit.
   plane_t plane = world_planes[id];
@@ -244,66 +309,73 @@ void intersection_plane()
     {
       float t = (-plane.d - dot(plane.n, rayOrigin)) / denom;
       if ((t > minHitDistance)
-          //NOTE: so I'm getting rid of this condition because it seems super
-          // odd for us to not mark the hit if this ray was larger than the last
-          // (where this logic was copy pasta from CPU side app).
+          //NOTE: this condition is copy pasta from the CPU side app.
+          // it is there because we need to compare the curr object to the current Tmax,
+          // to ensure that we are looking at the closest hit.
+          // however, dxr has us covered in this case.
           //&& (t < hitDistance)
           )
         {
-          attr.hitDistance = t;
           attr.hitMatIndex = plane.matIndex;
           attr.nextNormal = plane.n;
-          hit=true;
+           ReportHit(
+              t, // new THit
+              0, //hitkind
+              attr);
         }
     }
   
-  if(hit)
-    ReportHit(
-              attr.hitDistance, // new THit
-              0, //hitkind
-              attr);
   
 }
 
- /*
+
 [shader("closesthit")]
 void closesthit_main(inout MyPayload payload, in MyAttributes attr)
 {
 
+  const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE;
+  uint3 rayIndex=DispatchRaysIndex();
+
+  uint2 xy = rayIndex.xy + uint2(texelX,texelY);
+  
   material_t mat = world_materials[attr.hitMatIndex];
 
   // make the contribution!!!!!!!!!!!!
-  payload.color = payload.result + Hadamard(payload.attenuation, mat.emitColor);
-  payload.attenuation = Hadamard(payload.attenuation, mat.refColor);            
+  payload.color += payload.attenuation* mat.emitColor;
+  payload.attenuation = payload.attenuation* mat.refColor;            
+  payload.currBounce+=1;
+  if (payload.currBounce > 8) return;
 
   // compute the bounce, new origin and direction.
-  float3 rayOrigin=WorldRayOrigin();
+  float3 rayOrigin = WorldRayOrigin();
   float3 rayDirection=WorldRayDirection();
-  rayOrigin = rayOrigin + attr.hitDistance * rayDirection;
+  rayOrigin = rayOrigin + RayTCurrent() * rayDirection;
   float3 pureBounce = 
     rayDirection - 2.0f * dot(attr.nextNormal, rayDirection) * attr.nextNormal;
   float3 randomBounce = normalize(
                               attr.nextNormal + float3(
-                                              RandomBilateral(),
-                                              RandomBilateral(),
-                                              RandomBilateral()
+                                              RandomBilateral(xy),
+                                              RandomBilateral(xy),
+                                              RandomBilateral(xy)
                                                        ));
   // NOTE: scatter also needs to be a vector3.
   rayDirection = normalize(lerp(randomBounce, pureBounce, mat.scatter));
 
-  RayDesc r={};
-  r.Origin=rayOrigin;
-  r.Direction=rayDirection;
-  r.TMax=100;//TODO:
-                              
+  RayDesc reflectedRay;
+  reflectedRay.Origin=rayOrigin;
+  reflectedRay.Direction=rayDirection;
+  reflectedRay.TMax=100;//TODO:
+  reflectedRay.TMin=0;//TODO.
+
+  
   TraceRay(MyScene,
-            constRayFlags,
-            0xFF,
+           constRayFlags,
+           0xFF,
            //contrib idx's
            0,
            0,
            0,//miss shader idx.
-            reflectedRay,
-            payload);
+           reflectedRay,
+           payload);
+  
 }
-*/

@@ -112,11 +112,10 @@ struct game_data {
   ID3D12Resource *sceneBuffer = NULL;
   ID3D12Resource *rayShaderTable = NULL;
   ID3D12Resource *tlas = NULL;
-  ID3D12Resource *blas = NULL; // plane
-  // TODO: add sphere blas.
+  ID3D12Resource *BLASes[2] = {}; // TODO: 2 constant is hacky.
 
   ID3D12Resource *tlasScratch = NULL;
-  ID3D12Resource *blasScratch = NULL;
+  ID3D12Resource *blasScratches[2] = {}; // TODO: 2 constant is hacky.
 
   ID3D12Resource *AABBs = NULL;
   ID3D12Resource *tlasInstances = NULL;
@@ -283,7 +282,7 @@ static float halfFilmH;
 static v3 filmCenter;
 float halfPixW;
 float halfPixH;
-unsigned int raysPerPixel = 256;
+unsigned int g_raysPerPixel = 256;
 image_32_t image = {};
 
 std::mutex g_commandQueueMutex;
@@ -440,7 +439,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
         rayDesc.HitGroupTable = {
             gd->rayShaderTable->GetGPUVirtualAddress() +
                 2 * D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
-            D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT, // size
+            //TODO: this constant of 2 here is hacky.
+            D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT * 2, // size
             D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT  // stride
         };
 
@@ -535,8 +535,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                  x++) {
                 float filmX = -1.0f + 2.0f * (float)x / (float)image.width;
                 v3 color = {};
-                float contrib = 1.0f / (float)raysPerPixel;
-                for (unsigned int rayIndex = 0; rayIndex < raysPerPixel;
+                float contrib = 1.0f / (float)g_raysPerPixel;
+                for (unsigned int rayIndex = 0; rayIndex < g_raysPerPixel;
                      rayIndex++) {
                     float offX = filmX + (RandomBilateral() * halfPixW);
                     float offY = filmY + (RandomBilateral() * halfPixH);
@@ -729,16 +729,42 @@ struct upload_buffer_helper {
 void automata_engine::Init(game_memory_t *gameMemory) {
     AELoggerLog("Doing stuff...\n");
 
-    // early init of structures so that we can also copy into CBV.
-    materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
+    // early init of structures so that we can also copy into CBV,
+    // among other initialization needs.
+    materials[0].emitColor = V3(0.1f, 0.0f, 0.1f);
+    //    materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     materials[1].refColor = V3(0.5f, 0.5f, 0.5f);
+    //materials[1].emitColor = V3(0.5f, 0.5f, 0.5f);
+    materials[1].scatter=1;
     materials[2].refColor = V3(0.7f, 0.25f, 0.3f);
+    //materials[2].emitColor = V3(0.7f, 0.25f, 0.3f);
+    materials[2].scatter=1;
     materials[3].refColor = V3(0.0f, 0.8f, 0.0f);
+    //materials[3].emitColor = V3(0.0f, 0.8f, 0.0f);
     materials[3].scatter = 1.0f;
     planes[0].n = V3(0, 0, 1);
     planes[0].d = 0; // plane on origin
     planes[0].matIndex = 1;
+    spheres[0].p = V3(0,0,0);
+    spheres[0].r = 1.0f;
+    spheres[0].matIndex = 2;
+    spheres[1].p = V3(-3,0,-2);
+    spheres[1].r = 1.0f;
+    spheres[1].matIndex = 2;
+    spheres[2].p = V3(-2,2,0);
+    spheres[2].r = 1.0f;
+    spheres[2].matIndex = 3;
+    world.materialCount = ARRAY_COUNT(materials);
+    world.materials = materials;
+    world.planeCount = ARRAY_COUNT(planes);
+    world.planes = planes;
+    world.sphereCount = ARRAY_COUNT(spheres);
+    world.spheres = spheres;
 
+    assert(world.sphereCount <= DXR_WORLD_LIMIT);
+    assert(world.planeCount <= DXR_WORLD_LIMIT);
+    assert(world.materialCount <= DXR_WORLD_LIMIT);
+    
     auto gd = getGameData(gameMemory);
 
     HRESULT hr;
@@ -874,6 +900,11 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     LPCWSTR c_raygenShaderName = L"ray_gen_shader";
     LPCWSTR c_missShaderName = L"miss_main";
     LPCWSTR c_planeIntersectShaderName = L"intersection_plane";
+    LPCWSTR c_sphereIntersectShaderName = L"intersection_sphere";
+    LPCWSTR c_closestHitShaderName = L"closesthit_main";
+    
+    LPCWSTR c_planeHitgroupName = L"hitgroup_plane";
+    LPCWSTR c_sphereHitgroupName = L"hitgroup_sphere";
 
     // NOTE: you know, I'm sort of convinced that what we have with this DXR API
     // is just really not so good. there just seems like so much crap that I
@@ -915,14 +946,26 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         lib->DefineExport(c_raygenShaderName);
         lib->DefineExport(c_missShaderName);
         lib->DefineExport(c_planeIntersectShaderName);
-
-        // create hit group
+        lib->DefineExport(c_sphereIntersectShaderName);
+        lib->DefineExport(c_closestHitShaderName);
+       
+        
+        // create hit group plane
         auto hitGroup =
             raytracingPipeline.CreateSubobject<CD3DX12_HIT_GROUP_SUBOBJECT>();
         hitGroup->SetIntersectionShaderImport(c_planeIntersectShaderName);
-        hitGroup->SetHitGroupExport(L"hitgroup");
+        hitGroup->SetHitGroupExport(c_planeHitgroupName);
         hitGroup->SetHitGroupType(D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE);
+        hitGroup->SetClosestHitShaderImport(c_closestHitShaderName);
 
+        // create hit group sphere
+        auto hitGroup2 =
+            raytracingPipeline.CreateSubobject<CD3DX12_HIT_GROUP_SUBOBJECT>();
+        hitGroup2->SetIntersectionShaderImport(c_sphereIntersectShaderName);
+        hitGroup2->SetHitGroupExport(c_sphereHitgroupName);
+        hitGroup2->SetHitGroupType(D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE);
+        hitGroup2->SetClosestHitShaderImport(c_closestHitShaderName);
+        
         // Define the maximum sizes in bytes for the ray payload and attribute
         // structure.
         auto shaderConfig =
@@ -966,8 +1009,29 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         static_assert(shaderIdentifierSize <= shaderTableAlign,
                       "we assume shaderIdentifierSize <= shaderTableAlign.");
 
+#define MAX_RECORDS 10
+        
+        // shader records to put in there.
+        struct {
+          struct {
+            void *ident;
+            LPCWSTR name;
+          } records[MAX_RECORDS];
+          size_t recordCount;
+        } shaderTables[] = {
+          {
+            {{nullptr, c_raygenShaderName}},1},
+          {
+            {{nullptr, c_missShaderName}},1},
+          {
+            {{nullptr, c_planeHitgroupName},
+             {nullptr, c_sphereHitgroupName}},2}
+        };
+
+
+        
         uint8_t *data = nullptr;
-        uBuffer.curr().size = shaderTableAlign * 3;
+        uBuffer.curr().size = shaderTableAlign * _countof(shaderTables);
         uBuffer.curr().src =
             ae::DX::AllocUploadBuffer(gd->d3dDevice, uBuffer.curr().size,
                                       (void **)&data); // begins mapped.
@@ -986,39 +1050,46 @@ void automata_engine::Init(game_memory_t *gameMemory) {
              IID_PPV_ARGS(&gd->rayShaderTable)));
         INIT_FAIL_CHECK();
 
+        //TODO: maybe we use diff resources for the shader tables?
+        // there is currently some wasted memory due to table start addr requirements.
         uBuffer.curr().dst = gd->rayShaderTable;
         uBuffer.curr().initState =
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-
-        void *rayGenShaderIdentifier;
-        void *missShaderIdentifier;
-        void *hitgroupShaderIdentifier;
 
         ID3D12StateObjectProperties *o;
         defer(COM_RELEASE(o));
         gd->rayStateObject->QueryInterface(&o);
 
-        rayGenShaderIdentifier = o->GetShaderIdentifier(c_raygenShaderName);
-        missShaderIdentifier = o->GetShaderIdentifier(c_missShaderName);
-        hitgroupShaderIdentifier = o->GetShaderIdentifier(L"hitgroup");
-
-        assert(rayGenShaderIdentifier);
-        assert(missShaderIdentifier);
-        assert(hitgroupShaderIdentifier);
-
         if (data) {
-          // NOTE: the miss shader table start addr needs to be align to
-          // D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT.
-          memset(data, 0, shaderTableAlign * 3);
-          memcpy(data, rayGenShaderIdentifier, shaderIdentifierSize);
-          data += shaderTableAlign;
-          memcpy(data, missShaderIdentifier, shaderIdentifierSize);
-          data += shaderTableAlign;
-          memcpy(data, hitgroupShaderIdentifier, shaderIdentifierSize);
+          auto totalSize = uBuffer.curr().size;
+          memset(data, 0, totalSize );
+          for (int j=0; j<_countof(shaderTables);j++)
+            {
+              auto &shaderRecords=shaderTables[j].records;
+              uint8_t *pRecord=data;
+              auto rc = shaderTables[j].recordCount;
+              assert(rc<=MAX_RECORDS);
+              for ( int i=0;i < rc;i++ )
+                {
+                  auto v= shaderRecords[i].ident = o->GetShaderIdentifier(shaderRecords[i].name);
+                  assert(v);
 
-        } else {
+                  assert(size_t(pRecord+shaderIdentifierSize-data)<=totalSize);
+                  memcpy(pRecord, v, shaderIdentifierSize);
+                  pRecord +=  recordAlign;
+                  
+                }
+
+              data += shaderTableAlign;
+            }
+
+
+        }else {
           AELoggerError("oopsy");
+        
         }
+
+#undef MAX_RECORDS
 
         uBuffer.curr().src->Unmap(0,      // subres
                                   nullptr // entire subresource was modified.
@@ -1028,7 +1099,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     }
 
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
-    const size_t sceneBufferSize = ae::math::max(256ull, sizeof(dxr_world));
+    const size_t sceneBufferSize = ae::math::align_up(sizeof(dxr_world), 256ull);
 
     auto fnCreateCmdList = [&](ID3D12CommandAllocator **ppAllocator,
                                ID3D12GraphicsCommandList **ppCmdList,
@@ -1089,36 +1160,42 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         auto device = getRayDevice(gd->d3dDevice);
 
         // scene infos.
-        constexpr auto AABBcount = 1u;
-        constexpr auto tlasInstanceCount = 1u;
+        constexpr auto AABBcount = 2u;
+        constexpr auto geoCount = 2u;
+        constexpr auto tlasInstanceCount = 4u;
 
         // we begin by making all the BLASes.
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bottomLevelInputs =
-            {};
-        D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {};
         {
+          size_t AABBsStride = sizeof(D3D12_RAYTRACING_AABB);
+          size_t AABBsSize = AABBsStride  * AABBcount;
+
           // upload aabbs.
           {
-                size_t AABBsSize = ae::math::align_up(
-                    sizeof(D3D12_RAYTRACING_AABB) * AABBcount,
-                    D3D12_RAYTRACING_AABB_BYTE_ALIGNMENT);
-
-                void *data;
+            void *data;
                 gd->AABBs =
                     ae::DX::AllocUploadBuffer(gd->d3dDevice, AABBsSize, &data);
 
                 if (data) {
                     memset(data, 0, AABBsSize);
-                    D3D12_RAYTRACING_AABB aabb = {};
-                    // TODO: make this a legit aabb.
-                    //  like, use the plane for the scene.
-                    aabb.MinX = -1;
-                    aabb.MinY = -1;
-                    aabb.MinZ = -1;
-                    aabb.MaxX = 1;
-                    aabb.MaxY = 1;
-                    aabb.MaxZ = 1;
-                    memcpy(data, &aabb, sizeof(D3D12_RAYTRACING_AABB));
+
+                    // make plane AABB.
+                    D3D12_RAYTRACING_AABB AABBs[AABBcount] = {};
+
+                    auto &planeAABB = AABBs[0];
+                    planeAABB.MinX = -1000;
+                    planeAABB.MinY = -0.01;
+                    planeAABB.MinZ = -1000;
+                    planeAABB.MaxX = 1000;
+                    planeAABB.MaxY = 0.01;
+                    planeAABB.MaxZ = 1000;
+
+                    // sphere AABB.
+                    //NOTE: default sphere has a radius of 1.
+                    auto &sphereAABB = AABBs[1];
+                    sphereAABB.MinX = sphereAABB.MinY = sphereAABB.MinZ = -1;
+                    sphereAABB.MaxX = sphereAABB.MaxY = sphereAABB.MaxZ = 1;
+                    
+                    memcpy(data, AABBs, AABBsSize );
                 } else {
                     AELoggerLog("oops");
                 }
@@ -1128,35 +1205,46 @@ void automata_engine::Init(game_memory_t *gameMemory) {
                 );
           }
 
-          // create geometries from aabbs.
+          // setup geometries from aabbs.
+          D3D12_RAYTRACING_GEOMETRY_DESC geometryDescs[geoCount] = {};
           {
-                geometryDesc.Type =
-                    D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
-                geometryDesc.AABBs.AABBCount = AABBcount;
-
-                geometryDesc.AABBs.AABBs = {gd->AABBs->GetGPUVirtualAddress(),
-                                            // TODO: is this the right one?
-                                            sizeof(D3D12_RAYTRACING_AABB)};
+            auto &planeDesc = geometryDescs[0];
+            planeDesc.Type =
+              D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+            planeDesc.AABBs.AABBCount = 1;
+            planeDesc.AABBs.AABBs = {gd->AABBs->GetGPUVirtualAddress(),
+                                        AABBsStride};
+            auto &sphereDesc = geometryDescs[1];
+            sphereDesc.Type =
+              D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+            sphereDesc.AABBs.AABBCount = 1;
+            sphereDesc.AABBs.AABBs = {gd->AABBs->GetGPUVirtualAddress()+
+                                      AABBsStride,
+                                        AABBsStride};
           }
 
-          // get prebuild info.
-          D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO
-          bottomLevelPrebuildInfo = {};
-          {
+          auto fnCreateBlasFromSingleGeometryDesc = [&](int idx) {
+
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bottomLevelInputs =
+            {};
+
+            // get prebuild info.
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO
+            bottomLevelPrebuildInfo = {};
+            {
                 bottomLevelInputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
                 bottomLevelInputs.Type =
                     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
                 bottomLevelInputs.NumDescs = 1;
                 bottomLevelInputs.pGeometryDescs =
-                    &geometryDesc; // 1 geometry def to which instances can be
-                                   // made.
+                    &geometryDescs[idx];
 
                 device->GetRaytracingAccelerationStructurePrebuildInfo(
                     &bottomLevelInputs, &bottomLevelPrebuildInfo);
-          }
-
-          // create blas.
-          (hr = gd->d3dDevice->CreateCommittedResource(
+            }
+          
+            // create blas.
+            (hr = gd->d3dDevice->CreateCommittedResource(
                &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
                D3D12_HEAP_FLAG_NONE,
                &CD3DX12_RESOURCE_DESC::Buffer(
@@ -1164,20 +1252,49 @@ void automata_engine::Init(game_memory_t *gameMemory) {
                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
                D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
                nullptr, // optimized clear.
-               IID_PPV_ARGS(&gd->blas)));
-          INIT_FAIL_CHECK();
+               IID_PPV_ARGS(&gd->BLASes[idx])));
 
-          // create scratch.
-          UINT64 scratchSize = bottomLevelPrebuildInfo.ScratchDataSizeInBytes;
-          (hr = gd->d3dDevice->CreateCommittedResource(
+            //TODO: since we are in a lambda, init fail check is only going to fail
+            // to out of this func, but will not return any further.
+            INIT_FAIL_CHECK();
+
+            //TODO: we could create one scratch buffer that is large enough to hold
+            // for all BLAS and TLAS.
+            //
+            // create scratch.
+            UINT64 scratchSize = bottomLevelPrebuildInfo.ScratchDataSizeInBytes;
+            (hr = gd->d3dDevice->CreateCommittedResource(
                &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
                D3D12_HEAP_FLAG_NONE,
                &CD3DX12_RESOURCE_DESC::Buffer(
                    scratchSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                nullptr, // optimized clear.
-               IID_PPV_ARGS(&gd->blasScratch)));
-          INIT_FAIL_CHECK();
+               IID_PPV_ARGS(&gd->blasScratches[idx])));
+            INIT_FAIL_CHECK();
+
+            auto cmd = getRayCmdList(gd->commandList);
+
+            // Bottom Level Acceleration Structure desc
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC
+            bottomLevelBuildDesc = {};
+            {
+              bottomLevelBuildDesc.Inputs = bottomLevelInputs;
+              bottomLevelBuildDesc.ScratchAccelerationStructureData =
+                gd->blasScratches[idx]->GetGPUVirtualAddress();
+              bottomLevelBuildDesc.DestAccelerationStructureData =
+                gd->BLASes[idx]->GetGPUVirtualAddress();
+            }
+
+            // record the building.
+            cmd->BuildRaytracingAccelerationStructure(&bottomLevelBuildDesc, 0,
+                                                      nullptr);
+            cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(gd->BLASes[idx]));
+          };
+
+          for (int i = 0; i < geoCount;i++)
+              fnCreateBlasFromSingleGeometryDesc(i);
+
         }
         // END blas construction.
         // NOTE: we initially had some issues getting this to work. what were
@@ -1187,13 +1304,14 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         // - and that those had to exist (the array is not null) when init the
         // prebuild info. this indicates the data had to be valid on the GPU, afaik.
 
+        
         // create the TLAS.
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS topLevelInputs =
-            {};
         {
           // get prebuild info.
           D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO
-          topLevelPrebuildInfo = {};
+            topLevelPrebuildInfo = {};
+          D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS topLevelInputs =
+            {};
           {
                 topLevelInputs.Type =
                     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
@@ -1216,27 +1334,82 @@ void automata_engine::Init(game_memory_t *gameMemory) {
                IID_PPV_ARGS(&gd->tlas)));
           INIT_FAIL_CHECK();
 
-          // instantiate an instance of the blas in tlas.
+          // instantiate blas instances.
           {
-                size_t bSize = sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+                size_t bSize = tlasInstanceCount* sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+                D3D12_RAYTRACING_INSTANCE_DESC instanceDescs[tlasInstanceCount] = {};
 
-                D3D12_RAYTRACING_INSTANCE_DESC instanceDesc = {};
-                // TODO: use the actual data about the plane to inform the
-                // transformation matrix.
-                instanceDesc.Transform[0][0] = instanceDesc.Transform[1][1] =
-                    instanceDesc.Transform[2][2] = 1;
-                // NOTE: we are set the instance ID to 0.
-                instanceDesc.InstanceMask =
-                    0xFF; // bitwise OR and if zero, ignore.
-                instanceDesc.AccelerationStructure =
-                    gd->blas->GetGPUVirtualAddress();
+                int baseInstance=0;
+                int instanceDescOffset=0;
+                int totalInstanceCount=0;
 
+                assert(world.planeCount==1);
+                
+                for (int i=0; i <world.planeCount;i++)
+                  {
+                    auto &inst = instanceDescs[baseInstance+i];
+
+                    // TODO: our application does not currently support arbitrary planes.
+                    // we only support the inf plane with normal pointing straight up.
+                    inst.Transform[0][0] = inst.Transform[1][1] =
+                      inst.Transform[2][2] = 1;
+
+                    inst.InstanceID=i;
+
+                    // TODO: maybe we care about different blas having different instance masks,
+                    // but for now, 0xff for all blas is what we do.
+                    inst.InstanceMask =
+                      0xFF; // bitwise OR with what given on TraceRay side, and if zero, ignore.
+
+                    inst.AccelerationStructure =
+                      gd->BLASes[baseInstance]->GetGPUVirtualAddress();
+                    inst.InstanceContributionToHitGroupIndex = baseInstance;
+
+                    totalInstanceCount++;
+                  }
+
+                baseInstance++;
+                instanceDescOffset+= world.planeCount;
+                
+                for (int i=0; i < world.sphereCount;i++)
+                  {
+                    auto &inst = instanceDescs[instanceDescOffset+i];
+
+                    //TODO: our application does not support arbitrary radii spheres,
+                    // although, that would be relatively trivial to support.
+                    inst.Transform[0][0] = inst.Transform[1][1] =
+                      inst.Transform[2][2] = 1;
+                    //setup translation.
+                    // NOTE: the transform is setup as 3 float4's contiguous in memory.
+                    // where if you were to write this on a sheet of paper, you would
+                    // be looking at a matrix of 4 columns and 3 rows.
+                    inst.Transform[0][3]=world.spheres[i].p.x;
+                    inst.Transform[1][3]=world.spheres[i].p.y;
+                    inst.Transform[2][3]=world.spheres[i].p.z;
+                    //memcpy(&inst.Transform[3], &world.spheres[i].p, sizeof(float)*3);
+
+                    inst.InstanceID=i;
+
+                    // TODO: maybe we care about different blas having different instance masks,
+                    // but for now, 0xff for all blas is what we do.
+                    inst.InstanceMask =
+                      0xFF; // bitwise OR with what given on TraceRay side, and if zero, ignore.
+
+                    inst.AccelerationStructure =
+                      gd->BLASes[baseInstance]->GetGPUVirtualAddress();
+                    inst.InstanceContributionToHitGroupIndex = baseInstance;
+
+                    totalInstanceCount++;
+                  }
+
+                assert(totalInstanceCount == tlasInstanceCount);
+                
                 void *data;
                 gd->tlasInstances =
                     ae::DX::AllocUploadBuffer(gd->d3dDevice, bSize, &data);
 
                 if (data) {
-                    memcpy(data, &instanceDesc, bSize);
+                    memcpy(data, &instanceDescs, bSize);
                 } else {
                     AELoggerLog("oops");
                 }
@@ -1260,6 +1433,25 @@ void automata_engine::Init(game_memory_t *gameMemory) {
                nullptr, // optimized clear.
                IID_PPV_ARGS(&gd->tlasScratch)));
           INIT_FAIL_CHECK();
+
+          auto cmd = getRayCmdList(gd->commandList);
+
+          // Top Level Acceleration Structure desc
+          D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC topLevelBuildDesc =
+            {};
+          {
+            topLevelInputs.InstanceDescs =
+              gd->tlasInstances->GetGPUVirtualAddress();
+            topLevelBuildDesc.Inputs = topLevelInputs;
+            topLevelBuildDesc.DestAccelerationStructureData =
+              gd->tlas->GetGPUVirtualAddress();
+            topLevelBuildDesc.ScratchAccelerationStructureData =
+              gd->tlasScratch->GetGPUVirtualAddress();
+          }
+          
+          cmd->BuildRaytracingAccelerationStructure(&topLevelBuildDesc, 0,
+                                                    nullptr);
+          
         }
         // END tlas construction.
         //
@@ -1270,38 +1462,6 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         // that newly alloc scratch buffers are zero, and the hidden
         // acceleration structure impl relies on that.
 
-        auto cmd = getRayCmdList(gd->commandList);
-
-        // Bottom Level Acceleration Structure desc
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC
-            bottomLevelBuildDesc = {};
-        {
-          bottomLevelBuildDesc.Inputs = bottomLevelInputs;
-          bottomLevelBuildDesc.ScratchAccelerationStructureData =
-              gd->blasScratch->GetGPUVirtualAddress();
-          bottomLevelBuildDesc.DestAccelerationStructureData =
-              gd->blas->GetGPUVirtualAddress();
-        }
-
-        // Top Level Acceleration Structure desc
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC topLevelBuildDesc =
-            {};
-        {
-          topLevelInputs.InstanceDescs =
-              gd->tlasInstances->GetGPUVirtualAddress();
-          topLevelBuildDesc.Inputs = topLevelInputs;
-          topLevelBuildDesc.DestAccelerationStructureData =
-              gd->tlas->GetGPUVirtualAddress();
-          topLevelBuildDesc.ScratchAccelerationStructureData =
-              gd->tlasScratch->GetGPUVirtualAddress();
-        }
-
-        // record the building.
-        cmd->BuildRaytracingAccelerationStructure(&bottomLevelBuildDesc, 0,
-                                                  nullptr);
-        cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(gd->blas));
-        cmd->BuildRaytracingAccelerationStructure(&topLevelBuildDesc, 0,
-                                                  nullptr);
     }
     //
     // END the ray tracing acceleration structure stuff.
@@ -1370,14 +1530,36 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
                 if (data) {
                     dxr_world w = {};
-                    w.image.width = winInfo.width;
-                    w.image.height = winInfo.height;
+
+                    // TODO: right now we only support planes pointing up.
+                    // and because that, I am being lazy here and only init one plane info
+                    // in DXR world.
                     w.planes[0].d = 0;
                     // plane is pointing straight up!
                     w.planes[0].n[1] = 1; // this gives something that is NOT 0x1, since it is a float.
                     w.planes[0].matIndex = 1;
 
-                    // TODO: need to write the materials + world objects here.
+                    for (int i =0;i<world.sphereCount;i++)
+                      {
+                        w.spheres[i].r = world.spheres[i].r;
+                        w.spheres[i].matIndex = world.spheres[i].matIndex;
+                      }
+
+                    for (int i =0;i<world.materialCount;i++)
+                      {
+                        auto &mat = world.materials[i];
+                        w.materials[i].scatter = mat.scatter;
+                        memcpy(&w.materials[i].refColor, &mat.refColor,sizeof(float)*3);
+                        memcpy(&w.materials[i].emitColor, &mat.emitColor,sizeof(float)*3);
+                      }
+
+                    // generate the cone for shooting rays from a pixel.
+                    for (int i =0;i<g_raysPerPixel;i++)
+                      {
+                        w.rands[i].xy[0] = RandomBilateral();
+                        w.rands[i].xy[1] = RandomBilateral();
+                      }
+                    
                     memset(data, 0, sceneBufferSize);
                     memcpy(data, &w, sizeof(w));
 
@@ -1537,21 +1719,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
     image = AllocateImage(winInfo.width, winInfo.height);
 
-    spheres[0].p = V3(0,0,0);
-    spheres[0].r = 1.0f;
-    spheres[0].matIndex = 2;
-    spheres[1].p = V3(-3,-2,0);
-    spheres[1].r = 1.0f;
-    spheres[1].matIndex = 2;
-    spheres[2].p = V3(-2,0,2);
-    spheres[2].r = 1.0f;
-    spheres[2].matIndex = 3;
-    world.materialCount = ARRAY_COUNT(materials);
-    world.materials = materials;
-    world.planeCount = ARRAY_COUNT(planes);
-    world.planes = planes;
-    world.sphereCount = ARRAY_COUNT(spheres);
-    world.spheres = spheres;
+
     // define camera and characteristics
     cameraP = V3(0, -10, 1); // go back 10 and up 1
     cameraZ = Normalize(cameraP);
