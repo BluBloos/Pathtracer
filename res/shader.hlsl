@@ -222,11 +222,7 @@ void ray_gen_shader()
 [shader("miss")]
 void miss_main(inout MyPayload payload)
 {
-  payload.color += float3(
-                          0,
-                          float(0x82)/256.f,
-                          float(0xF0)/256.f
-                          ) * payload.attenuation;
+  payload.color += world_materials[0].emitColor * payload.attenuation;
 }
 
 [shader("intersection")]

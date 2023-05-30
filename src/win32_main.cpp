@@ -731,7 +731,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
     // early init of structures so that we can also copy into CBV,
     // among other initialization needs.
-    materials[0].emitColor = V3(0.1f, 0.0f, 0.1f);
+
+    materials[0].emitColor = V3(0.0f, float(0x82)/256.f, float(0xF0)/256.f);
     //    materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     materials[1].refColor = V3(0.5f, 0.5f, 0.5f);
     //materials[1].emitColor = V3(0.5f, 0.5f, 0.5f);
