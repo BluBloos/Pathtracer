@@ -1,6 +1,6 @@
 # Raytracer
 
-Dead simple, multi-threaded raytracer.
+a simple multi-threaded pathtracer.
 
 CPU VERSION:
 ![test](https://user-images.githubusercontent.com/38915815/190832651-a5e9dd42-5df7-4130-9d25-d87d7a039c7e.jpeg)
