@@ -1,4 +1,4 @@
-# Raytracer
+# Pathtracer
 
 a simple multi-threaded pathtracer.
 
