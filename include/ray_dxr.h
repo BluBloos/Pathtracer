@@ -1,6 +1,9 @@
 // TODO: is there a way to de-duplicate this information??
 //
 // like, include this .h directly into the hlsl shader code??
+//
+// like, yes. this can be done. it's a fair idea. it's called a "compat" header.
+
 
 // NOTE: how does HLSL pack data??
 // - 4 byte packing.
