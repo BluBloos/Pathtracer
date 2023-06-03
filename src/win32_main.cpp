@@ -53,6 +53,27 @@ helpers.
 
 /*
 
+getting the Sponza stuff working. (so, I'm more interested in doing this one)
+
+1. load the model(s) from .obj.
+2. load the textures and stuff.
+3. fix the problem of not being able to generate random things on the GPU.
+4. modify the shaders to do better material things.
+5. modify the acceleration structures quite a bit.
+
+the above tasks are written in no particular order, but if we want to write these things in 
+the desired order of completion, that would be: 
+
+1. fix the problem of not being able to generate random things on the GPU.
+2. then we load the models and modify the accel structure.
+3. then we start fucking around with the shader side of things and get better BRDFs + proper maths.
+4. finally we slap the textures on the meshes for maximum awesomeness.
+
+ */
+
+
+/*
+
 incrementally supporting the Vulkan stuff.
 
  - so as we did with the DX stuff, this looks like the first step is getting the
@@ -138,11 +159,22 @@ void ae::Init(game_memory_t *gameMemory)
     // among other initialization needs.
     static material_t materials[4] = {};  // NOTE: this must be static else taking that addr of it is quite
                                           // poor, due to the scop being inside a func.
-    materials[0].emitColor = V3(0.0f, float(0x82) / 256.f, float(0xF0) / 256.f);
+
+    
+    // NOTE: the way that our material system works is that the only way a pixel gets a color
+    // is if the ray is able to bounce to an emitter. along the way and before it hits the emitter,
+    // the colors are collected from the .refColor of the object.
+    //
+    // and in a way, we can think of this as the objects absorbing specific wavelenghts, leaving the
+    // wavelength of the color we actually see. so it's a bit of a mask operation.
+    //
+    // the scatter param simply describes how rough the surface is. the higher the value, the more rough
+    // the surface is. this results in very random bounces once a ray hits this surface.
+    materials[0].emitColor = V3(1.0f, 1, 1);
     materials[1].refColor  = V3(0.5f, 0.5f, 0.5f);
-    materials[1].scatter   = 1;
+    materials[1].scatter   = 0.;
     materials[2].refColor  = V3(0.7f, 0.25f, 0.3f);
-    materials[2].scatter   = 1;
+    materials[2].scatter   = 0.8;
     materials[3].refColor  = V3(0.0f, 0.8f, 0.0f);
     materials[3].scatter   = 1.0f;
 
@@ -175,6 +207,8 @@ void ae::Init(game_memory_t *gameMemory)
     auto gd = getGameData(gameMemory);
 
     if (g_appMode == APP_MODE_DXR) InitD3D12(gd);
+
+    //    if (g_appMode == APP_MODE_VK) InitVK(gd);
 
     game_window_info_t winInfo = ae::platform::getWindowInfo();
 
@@ -920,7 +954,7 @@ void InitD3D12(game_data *gd)
         // Define the maximum sizes in bytes for the ray payload and attribute
         // structure.
         auto shaderConfig  = raytracingPipeline.CreateSubobject<CD3DX12_RAYTRACING_SHADER_CONFIG_SUBOBJECT>();
-        UINT payloadSize   = 8 * sizeof(float);  // TODO: this is copy-pasta.
+        UINT payloadSize   = 16 * sizeof(float);  // TODO: this is copy-pasta.
         UINT attributeSize = 8 * sizeof(float);  // TODO: this is copy-pasta.
         shaderConfig->Config(payloadSize, attributeSize);
 

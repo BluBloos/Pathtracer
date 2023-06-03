@@ -20,7 +20,8 @@ struct MyPayload
 {
   float3 color;
   float3 attenuation;
-  uint currBounce;
+  uint   currBounce;
+  uint   currRandOffset;
 };
 
 struct MyAttributes
@@ -83,17 +84,22 @@ cbuffer TexelConstantBuffer : register(b0, space1)
 // raw buffer SRV.
 RaytracingAccelerationStructure MyScene : register(t0);
 
-
-float RandomUnilateral(uint2 n)
+// NOTE: from https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
+uint pcg_hash(uint input)
 {
-  return frac(sin(dot(randSeed*n, float2(12.9898, 4.1414))) * 43758.5453);
+    uint state = input * 747796405u + 2891336453u;
+    uint word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
 }
 
-float RandomBilateral(uint2 n)//-1 -> 1
-{
-  return 2.f*(RandomUnilateral(n)-0.5f);
-}
+float RandomUnilateral(uint n) { return (float)pcg_hash(n) / 4294967295.0; }
 
+float RandomBilateral(uint n, inout MyPayload payload)  //-1 -> 1
+{
+    float r = 2.f * (RandomUnilateral(n + payload.currRandOffset) - 0.5f);
+    payload.currRandOffset += 1;
+    return r;
+}
 
 // some magic sauce. TODO: this can be much better anyways.
 void LinearToSRGB(inout float L)
@@ -176,11 +182,19 @@ void ray_gen_shader()
   float3 color = float3(0,0,0);
 
   float contrib = 1.0f / (float)raysPerPixel;
-  
+
+  // TODO: this random gen stuff is maybe not the right math, but we seem to be getting
+  // unique numbers per call to random gen, and this holds true across all threads.
+  // things visually look okay, so let's call this good enough for now.
+  uint      rand_period = (8 * 4) * image_width * image_height;
+  MyPayload fakePayload;
+  fakePayload.currRandOffset = rand_period * (xy.x + xy.y * image_width);
+
   for (int i = 0; i < raysPerPixel; i++) {
 
     float offX = filmX + (rands[i].rand.x * halfPixW);
     float offY = filmY + (rands[i].rand.y * halfPixH);
+
     float3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
     float3 rayOrigin = cameraP;
     float3 rayDirection = normalize(filmP - cameraP);
@@ -189,15 +203,15 @@ void ray_gen_shader()
     r.Origin=rayOrigin;
     r.Direction=rayDirection;
     r.TMax=100;//TODO:
-    r.TMin=0;
+    r.TMin=0.001;
     MyPayload p;
     p.color = float3(0,0,0);
     p.attenuation = float3(1,1,1);
     p.currBounce=0;
+    p.currRandOffset=fakePayload.currRandOffset;
     TraceRay(
              MyScene,
              constRayFlags,
-
              0xFF, //8 bit InstanceMask.
              // NOTE: this is just where this guy & the mask on the actual tlas instance must be nonzero,
              // then we don't ignore.
@@ -209,6 +223,7 @@ void ray_gen_shader()
              r, p
              );
     color = color + contrib * p.color;
+    fakePayload.currRandOffset = p.currRandOffset;
   }
 
   LinearToSRGB(color);
@@ -216,6 +231,7 @@ void ray_gen_shader()
 //NOTE: we won't be accumulating in the alpha part of the color,
 // so default it to 0xFF
   gpuTex[ xy ] = float4(color,1);
+
 }
 
 
@@ -337,23 +353,26 @@ void closesthit_main(inout MyPayload payload, in MyAttributes attr)
   material_t mat = world_materials[attr.hitMatIndex];
 
   // make the contribution!!!!!!!!!!!!
-  payload.color += payload.attenuation* mat.emitColor;
-  payload.attenuation = payload.attenuation* mat.refColor;            
-  payload.currBounce+=1;
+  payload.color += payload.attenuation * mat.emitColor;
+  payload.attenuation = payload.attenuation * mat.refColor;
+  payload.currBounce += 1;
   if (payload.currBounce > 8) return;
 
   // compute the bounce, new origin and direction.
-  float3 rayOrigin = WorldRayOrigin();
-  float3 rayDirection=WorldRayDirection();
-  rayOrigin = rayOrigin + RayTCurrent() * rayDirection;
-  float3 pureBounce = 
-    rayDirection - 2.0f * dot(attr.nextNormal, rayDirection) * attr.nextNormal;
-  float3 randomBounce = normalize(
-                              attr.nextNormal + float3(
-                                              RandomBilateral(xy),
-                                              RandomBilateral(xy),
-                                              RandomBilateral(xy)
-                                                       ));
+  float3 rayOrigin    = WorldRayOrigin();
+  float3 rayDirection = WorldRayDirection();
+  rayOrigin           = rayOrigin + RayTCurrent() * rayDirection;
+  float3 pureBounce   = rayDirection - 2.0f * dot(attr.nextNormal, rayDirection) * attr.nextNormal;
+
+  float3 randomBounce = normalize(attr.nextNormal +
+
+                                  normalize(float3(
+                                      // TODO: should not need the zeros
+                                      // in here anymore.
+                                      RandomBilateral(0, payload),
+                                      RandomBilateral(0, payload),
+                                      RandomBilateral(0, payload))));
+
   // NOTE: scatter also needs to be a vector3.
   rayDirection = normalize(lerp(randomBounce, pureBounce, mat.scatter));
 
@@ -361,7 +380,7 @@ void closesthit_main(inout MyPayload payload, in MyAttributes attr)
   reflectedRay.Origin=rayOrigin;
   reflectedRay.Direction=rayDirection;
   reflectedRay.TMax=100;//TODO:
-  reflectedRay.TMin=0;//TODO.
+  reflectedRay.TMin=0.001;//TODO.
 
   
   TraceRay(MyScene,
