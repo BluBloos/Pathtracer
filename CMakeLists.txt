@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 
+option(RayEnableDX "use DXR" OFF)
+option(RayEnableVK "use Vulkan" OFF)
+
 set(ProjectName "Raytracer")
 
 project(${ProjectName}
@@ -12,7 +15,13 @@ project(${ProjectName}
 
 set(ProjectExplicitResOutputDir "res")
 set(ProjectRoot "${CMAKE_CURRENT_SOURCE_DIR}")
-set(ProjectBackend "DX12_BACKEND CPU_BACKEND")
+
+if (RayEnableVK)
+    set(ProjectBackend "VK_BACKEND CPU_BACKEND")
+else()
+    set(ProjectBackend "DX12_BACKEND CPU_BACKEND")
+endif()
+
 #set(ProjectDisableEngineIntro ON)
 set(ProjectDisableImGui ON)
 

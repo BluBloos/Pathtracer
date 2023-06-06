@@ -1,6 +1,8 @@
 build
+buildVK
 bin/
 data/
 gist/github
 ./**/*.bmp
 *~
+.vscode

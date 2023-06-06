@@ -62,12 +62,16 @@ typedef struct world {
     sphere      *spheres;
 } world_t;
 
+#if AUTOMATA_ENGINE_DX12_BACKEND
 #include <D3d12.h>
 #include <dxgi1_6.h>
 #include <D3dx12.h>
+#endif
 
 // TODO: we need to free many of the resources in this structure.
 struct game_data {
+
+#if AUTOMATA_ENGINE_DX12_BACKEND
     // some stupid shit.
     ID3D12Device *d3dDevice       = NULL;
     ID3D12Debug  *debugController = NULL;
@@ -113,4 +117,44 @@ struct game_data {
     ID3D12Fence               *rayFences[THREAD_COUNT]        = {};
     int                        rayFenceValues[THREAD_COUNT]   = {};
     HANDLE                     rayFenceEvents[THREAD_COUNT]   = {};
+#endif
+
+#if AUTOMATA_ENGINE_VK_BACKEND
+    VkInstance vkInstance;// = NULL;
+    VkDebugUtilsMessengerEXT vkDebugMsg;// = nullptr;
+    VkPhysicalDevice vkGpu; //= gpus[0];
+    VkDevice vkDevice;
+
+    // upload heaps.
+    uint32_t vkUploadHeapIdx;
+    uint32_t vkVramHeapIdx;
+
+    // resources.
+    VkImage vkCpuTex;
+    VkImageView vkCpuTexView;
+    VkBuffer vkCpuTexBuffer;
+
+    // memory backing the resources.
+    VkDeviceMemory vkCpuTexBacking;
+    VkDeviceMemory vkCpuTexBufferBacking;
+    size_t vkCpuTexSize;
+    size_t vkCpuTexBufferSize;
+
+    // layout.
+    VkDescriptorSetLayout descSet; // TODO: maybe rename this one.
+      // the layout is used as part of the pipeline sig + a way to allocated sets from the pool.
+    VkPipelineLayout pipelineLayout;
+    VkDescriptorSet theDescSet;    // allocated from the pool.
+    VkDescriptorPool descPool;
+
+    // for the compute copy work.
+    VkCommandBuffer cmdBuf;
+    VkCommandPool commandPool;
+    VkPipeline vkComputePipeline;
+
+    // for the queue.
+    int vkQueueIndex = -1;
+    VkQueue vkQueue;
+    VkFence vkFence;
+#endif
 };

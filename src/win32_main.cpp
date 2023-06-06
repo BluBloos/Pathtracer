@@ -19,11 +19,16 @@
 // different application modes.
 enum app_mode { APP_MODE_DXR, APP_MODE_VK, APP_MODE_CPU };
 
+#if AUTOMATA_ENGINE_DX12_BACKEND
 static app_mode g_appMode = APP_MODE_DXR;
+#elif AUTOMATA_ENGINE_VK_BACKEND
+static app_mode g_appMode = APP_MODE_VK;
+#endif
 
 // a nice helper + forward decls.
 game_data        *getGameData(ae::game_memory_t *gameMemory) { return (game_data *)gameMemory->data; }
 void              InitD3D12(game_data *gd);
+void              InitVK(ae::game_memory_t *gameMemory);
 void              visualizer(ae::game_memory_t *gameMemory);
 static image_32_t AllocateImage(unsigned int width, unsigned int height);
 DWORD WINAPI      master_thread(_In_ LPVOID lpParameter);
@@ -65,8 +70,8 @@ the above tasks are written in no particular order, but if we want to write thes
 the desired order of completion, that would be: 
 
 1. fix the problem of not being able to generate random things on the GPU.
-2. then we load the models and modify the accel structure.
-3. then we start fucking around with the shader side of things and get better BRDFs + proper maths.
+2. then we start fucking around with the shader side of things and get better BRDFs + proper maths.
+3. then we load the models and modify the accel structure.
 4. finally we slap the textures on the meshes for maximum awesomeness.
 
  */
@@ -121,6 +126,7 @@ void automata_engine::Close(ae::game_memory_t *gameMemory)
 
     // TODO: is there a proper order to release these objects?
 
+#if AUTOMATA_ENGINE_DX12_BACKEND
     COM_RELEASE(gd->commandQueue);
     COM_RELEASE(gd->commandList);
     COM_RELEASE(gd->commandAllocator);
@@ -137,6 +143,8 @@ void automata_engine::Close(ae::game_memory_t *gameMemory)
 
     COM_RELEASE(gd->debugController);
     COM_RELEASE(gd->d3dDevice);
+    
+#endif //TODO: a good idea would be to make a "CloseDX12" kind of idea.
 }
 
 // TODO: we really do not like the below.
@@ -206,9 +214,11 @@ void ae::Init(game_memory_t *gameMemory)
 
     auto gd = getGameData(gameMemory);
 
+#if AUTOMATA_ENGINE_DX12_BACKEND
     if (g_appMode == APP_MODE_DXR) InitD3D12(gd);
-
-    //    if (g_appMode == APP_MODE_VK) InitVK(gd);
+#elif AUTOMATA_ENGINE_VK_BACKEND
+    if (g_appMode == APP_MODE_VK) InitVK(gameMemory);
+#endif
 
     game_window_info_t winInfo = ae::platform::getWindowInfo();
 
@@ -352,6 +362,7 @@ void blitToGameBackbuffer(ae::game_memory_t *gameMemory)
 
     auto gd = getGameData(gameMemory);
 
+#if AUTOMATA_ENGINE_DX12_BACKEND
     {
         std::lock_guard<std::mutex> lock(g_commandQueueMutex);
 
@@ -384,6 +395,58 @@ void blitToGameBackbuffer(ae::game_memory_t *gameMemory)
         rowPitch * gameMemory->backbufferHeight,
         0,  // src subresource.
         &box);
+#endif
+
+// TODO: put the vk_check idea in the block below.
+#if AUTOMATA_ENGINE_VK_BACKEND
+
+    // kick off the work.
+    VkSubmitInfo si       = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &gd->cmdBuf;
+    (vkQueueSubmit(gd->vkQueue, 1, &si, gd->vkFence));
+
+    // wait for the work.
+    VkResult result = (vkWaitForFences(gd->vkDevice,
+        1,
+        &gd->vkFence,
+        VK_TRUE,               //wait until all the fences are signaled. this blocks the CPU thread.
+        1000 * 1000 * 1000));  // wait for 1s as a timeout?
+    if (result == VK_SUCCESS) {
+        // reset fences back to unsignaled so that can use em' again;
+        vkResetFences(gd->vkDevice, 1, &gd->vkFence);
+    } else {
+        AELoggerError("some error occurred during the fence wait thing., %s", ae::VK::VkResultToString(result));
+    }
+
+    size_t size = gameMemory->backbufferWidth * gameMemory->backbufferHeight * sizeof(int);
+
+    auto   thingToMap = gd->vkCpuTexBufferBacking;
+    size_t mapOffset  = 0;
+    size_t mapSize    = VK_WHOLE_SIZE;
+
+    int   flags = 0;
+    void *data  = nullptr;
+    // TODO: we should keep this memory persistently mapped.
+    result = vkMapMemory(gd->vkDevice, thingToMap, mapOffset, mapSize, flags, &data);
+    if (result == VK_SUCCESS && data) {
+        // make the GPU writes to mapped region visible so that CPU can do the reading
+        VkMappedMemoryRange range = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory              = thingToMap;
+        range.offset              = mapOffset;
+        range.size                = mapSize;
+        result                    = vkInvalidateMappedMemoryRanges(gd->vkDevice, 1, &range);
+        assert(result == VK_SUCCESS);
+
+        assert(gd->vkCpuTexBufferSize >= size);
+        memcpy((void *)gameMemory->backbufferPixels, data, size);
+
+        vkUnmapMemory(gd->vkDevice, thingToMap);
+    }
+
+    // make sure we get the data into the backbuffer memory so that it can be blit to screen.
+
+#endif
 
 #undef UPDATE_FAIL_CHECK
 }
@@ -391,7 +454,10 @@ void blitToGameBackbuffer(ae::game_memory_t *gameMemory)
 void visualizer(ae::game_memory_t *gameMemory)
 {
     switch (g_appMode) {
-        case APP_MODE_DXR: {
+
+        case APP_MODE_DXR:
+        case APP_MODE_VK:
+        {
             blitToGameBackbuffer(gameMemory);
         } break;
         case APP_MODE_CPU: {
@@ -417,6 +483,7 @@ struct render_thread_data {
     game_data                       *gd;
 };
 
+#if AUTOMATA_ENGINE_DX12_BACKEND
 // TODO: for therse two functions below, do we need to schedule a release???
 // pretty sure we do, and query interface increases the reference count of the
 // thing.
@@ -434,6 +501,7 @@ ID3D12Device5 *getRayDevice(ID3D12Device *device)
     assert(r);
     return r;
 }
+#endif
 
 // NOTE(Noah):
 // Here's some documentation on some of the first multithreading bugs I have
@@ -464,6 +532,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter)
         switch (g_appMode)
 
         {
+#if AUTOMATA_ENGINE_DX12_BACKEND
             case APP_MODE_DXR: {
                 HRESULT hr;
                 // record command list.
@@ -570,6 +639,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter)
                     ));
 
             } break;
+#endif // #if AUTOMATA_ENGINE_DX12_BACKEND
+
             case APP_MODE_CPU: {
                 unsigned int *out = g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
                 // Raytracer works by averaging all colors from all rays shot from this
@@ -725,6 +796,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter)
     ExitThread(0);
 }
 
+#if AUTOMATA_ENGINE_DX12_BACKEND
 struct upload_buffer {
     ID3D12Resource *src;
     ID3D12Resource *dst;
@@ -769,7 +841,560 @@ struct upload_buffer_helper {
 
     void iter() { ubCount++; }
 };
+#endif  // #if AUTOMATA_ENGINE_DX12_BACKEND
 
+#if AUTOMATA_ENGINE_VK_BACKEND
+
+void InitVK(ae::game_memory_t *gameMemory)
+{
+    auto gd = getGameData(gameMemory);
+
+#define VK_CHECK(x)                                                                                                    \
+    do {                                                                                                               \
+        VkResult err = x;                                                                                              \
+        if (err) {                                                                                                     \
+            AELoggerError("Detected Vulkan error: %s", ae::VK::VkResultToString(err));                                 \
+            abort();                                                                                                   \
+        }                                                                                                              \
+    } while (0)
+
+    // Volk is a Vulkan loader (gets the function pointers).
+    if (volkInitialize()) {
+        AELoggerError("Failed to initialize volk.");
+        return;
+    }
+
+    auto validateExtensions = [](const char **required, const VkExtensionProperties *available) -> bool {
+        for (uint32_t i = 0; i < StretchyBufferCount(required); i++) {
+            auto extension = required[i];
+            bool found     = false;
+            for (uint32_t j = 0; j < StretchyBufferCount(available); j++) {
+                auto available_extension = available[j];
+                if (strcmp(available_extension.extensionName, extension) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) { return false; }
+        }
+        return true;
+    };
+
+    // query the extensions we want.
+    const char **active_instance_extensions = nullptr;
+    {
+        uint32_t               instance_extension_count;
+        VkExtensionProperties *instance_extensions = nullptr;
+        defer(StretchyBufferFree(instance_extensions));
+
+        VK_CHECK(vkEnumerateInstanceExtensionProperties(nullptr, &instance_extension_count, nullptr));
+        StretchyBufferInitWithCount(instance_extensions, instance_extension_count);
+        VK_CHECK(vkEnumerateInstanceExtensionProperties(nullptr, &instance_extension_count, instance_extensions));
+        assert(instance_extension_count == StretchyBufferCount(instance_extensions));
+
+        // specify desired instance extensions and check to make sure available.
+
+        StretchyBufferPush(active_instance_extensions, VK_KHR_SURFACE_EXTENSION_NAME);
+        // NOTE: Below is deprecated by debug_utils instance extension.
+        // StretchyBufferPush(active_instance_extensions, VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+        StretchyBufferPush(active_instance_extensions, VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+        StretchyBufferPush(active_instance_extensions, /*VK_EXT_debug_utils*/ VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        if (!validateExtensions(active_instance_extensions, instance_extensions)) {
+            AELoggerError("Required instance extensions are missing.");
+            AELoggerLog("instance exts found count = %d", StretchyBufferCount(instance_extensions));
+            return;
+        }
+    }
+
+    // query the instance layers we want.
+    const char **requested_validation_layers = nullptr;
+    {
+        auto validateLayers = [](const char              **required,
+                                  uint32_t                 requiredCount,
+                                  const VkLayerProperties *available,
+                                  uint32_t                 availableCount) -> bool {
+            for (uint32_t i = 0; i < requiredCount; i++) {
+                auto *extension = required[i];
+                bool  found     = false;
+                for (uint32_t j = 0; j < availableCount; j++) {
+                    auto available_extension = available[j];
+                    if (strcmp(available_extension.layerName, extension) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) { return false; }
+            }
+            return true;
+        };
+
+        uint32_t           instance_layer_count;
+        VkLayerProperties *supported_validation_layers = nullptr;
+        defer(StretchyBufferFree(supported_validation_layers));
+        VK_CHECK(vkEnumerateInstanceLayerProperties(&instance_layer_count, nullptr));
+        StretchyBufferInitWithCount(supported_validation_layers, instance_layer_count);
+        VK_CHECK(vkEnumerateInstanceLayerProperties(&instance_layer_count, supported_validation_layers));
+
+        {
+            std::vector<std::vector<const char *>> validation_layer_priority_list = {
+                // The preferred validation layer is "VK_LAYER_KHRONOS_validation"
+                {"VK_LAYER_KHRONOS_validation"},
+                // Otherwise we fallback to using the LunarG meta layer
+                {"VK_LAYER_LUNARG_standard_validation"},
+                // Otherwise we attempt to enable the individual layers that compose the LunarG meta layer since it doesn't exist
+                {
+                    "VK_LAYER_GOOGLE_threading",
+                    "VK_LAYER_LUNARG_parameter_validation",
+                    "VK_LAYER_LUNARG_object_tracker",
+                    "VK_LAYER_LUNARG_core_validation",
+                    "VK_LAYER_GOOGLE_unique_objects",
+                },
+                // Otherwise as a last resort we fallback to attempting to enable the LunarG core layer
+                {"VK_LAYER_LUNARG_core_validation"}};
+
+            for (auto validation_layers : validation_layer_priority_list) {
+                if (validateLayers(validation_layers.data(),
+                        validation_layers.size(),
+                        supported_validation_layers,
+                        StretchyBufferCount(supported_validation_layers))) {
+                    for (auto layer : validation_layers) { StretchyBufferPush(requested_validation_layers, layer); }
+                    break;
+                }
+
+                AELoggerWarn("Couldn't find {%s, ...} - falling back", validation_layers[0]);
+            }
+        }
+
+        if (requested_validation_layers == nullptr) { AELoggerWarn("No validation layers enabled"); }
+    }
+
+    VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pApplicationName  = ae::defaultWindowName;
+    app.pEngineName       = "Automata Engine";         // TODO: is there a place from AE that we can get this?
+    app.apiVersion        = VK_MAKE_VERSION(1, 2, 0);  // highest version the app will use.
+
+    VkInstanceCreateInfo instance_info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instance_info.pApplicationInfo     = &app;
+
+    instance_info.enabledExtensionCount   = StretchyBufferCount(active_instance_extensions);
+    instance_info.ppEnabledExtensionNames = active_instance_extensions;
+
+    // layers are inserted into VK API call chains when they are enabled.
+    instance_info.enabledLayerCount   = StretchyBufferCount(requested_validation_layers);
+    instance_info.ppEnabledLayerNames = requested_validation_layers;
+
+    // the VK instance is the "VK runtime" sort of idea. by this point, we aren't talking with GPU.
+    VK_CHECK(vkCreateInstance(&instance_info, nullptr, &gd->vkInstance));
+
+    // TODO: maybe building the instance is something that can be pretty easy for AE to "just do" for the app.
+    // ae::VK::initVK(desiredExtensions, desiredLayers, appInfo);
+
+    // Load VK instance functions.
+    volkLoadInstance(gd->vkInstance);
+
+    // TODO: maybe this is a candidate to put in AE as well.
+    {
+        VkDebugUtilsMessengerCreateInfoEXT debugMsgerCI = {VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+        debugMsgerCI.messageSeverity                    = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+
+        {
+            debugMsgerCI.messageSeverity |=
+                VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+        }
+
+        debugMsgerCI.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                   VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                   VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        debugMsgerCI.pfnUserCallback = ae::VK::ValidationDebugCallback;
+
+        vkCreateDebugUtilsMessengerEXT(gd->vkInstance, &debugMsgerCI, nullptr, &gd->vkDebugMsg);
+    }
+
+    // now we init device and queue.
+    {
+        // find the GPU.
+        uint32_t          gpu_count = 0;
+        VkPhysicalDevice *gpus      = nullptr;
+        defer(StretchyBufferFree(gpus));
+        VK_CHECK(vkEnumeratePhysicalDevices(gd->vkInstance, &gpu_count, nullptr));
+        if (gpu_count != 1) {
+            if (gpu_count < 1)
+                AELoggerError("No physical device found.");
+            else
+                AELoggerError("Too many GPUs! Automata Engine only supports single adapter systems.");
+            return;
+        }
+        StretchyBufferInitWithCount(gpus, gpu_count);
+        VK_CHECK(vkEnumeratePhysicalDevices(gd->vkInstance, &gpu_count, gpus));
+        gd->vkGpu = gpus[0];
+
+        VkPhysicalDeviceProperties deviceProperties;
+        (vkGetPhysicalDeviceProperties(gd->vkGpu, &deviceProperties));
+
+        // find the queues and pick one.
+        uint32_t                 queue_family_count      = 0;
+        VkQueueFamilyProperties *queue_family_properties = nullptr;
+        defer(StretchyBufferFree(queue_family_properties));
+        (vkGetPhysicalDeviceQueueFamilyProperties(gd->vkGpu, &queue_family_count, nullptr));
+        if (queue_family_count < 1) {
+            AELoggerError("No queue family found.");
+            return;
+        }
+        StretchyBufferInitWithCount(queue_family_properties, queue_family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(gd->vkGpu, &queue_family_count, queue_family_properties);
+        for (uint32_t i = 0; i < queue_family_count; i++) {
+            // Find a queue family which supports graphics and presentation.
+            if ((queue_family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                gd->vkQueueIndex = i;
+                break;
+            }
+        }
+        if (gd->vkQueueIndex < 0) {
+            AELoggerError("Did not find suitable queue which supports graphics, compute and presentation.");
+        }
+
+        uint32_t               device_extension_count;
+        VkExtensionProperties *device_extensions = nullptr;
+        defer(StretchyBufferFree(device_extensions));
+        VK_CHECK(vkEnumerateDeviceExtensionProperties(gd->vkGpu, nullptr, &device_extension_count, nullptr));
+        StretchyBufferInitWithCount(device_extensions, device_extension_count);
+        VK_CHECK(vkEnumerateDeviceExtensionProperties(gd->vkGpu, nullptr, &device_extension_count, device_extensions));
+
+        // Initialize required extensions.
+        const char **required_device_extensions = nullptr;
+        defer(StretchyBufferFree(required_device_extensions));
+        //        StretchyBufferPush(required_device_extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        StretchyBufferPush(required_device_extensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        StretchyBufferPush(required_device_extensions, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        StretchyBufferPush(required_device_extensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+        if (!validateExtensions(required_device_extensions, device_extensions)) {
+            AELoggerError("missing required device extensions");
+            return;  //throw std::exception();
+        }
+
+        VkDeviceQueueCreateInfo queue_info     = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        const float             queue_priority = 1.0f;
+        queue_info.queueFamilyIndex            = gd->vkQueueIndex;
+        queue_info.queueCount                  = 1;
+        queue_info.pQueuePriorities            = &queue_priority;
+
+        VkDeviceCreateInfo device_info      = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+        device_info.queueCreateInfoCount    = 1;
+        device_info.pQueueCreateInfos       = &queue_info;
+        device_info.enabledExtensionCount   = StretchyBufferCount(required_device_extensions);
+        device_info.ppEnabledExtensionNames = required_device_extensions;
+
+        VK_CHECK(vkCreateDevice(gd->vkGpu, &device_info, nullptr, &gd->vkDevice));
+
+        // presumably loads device functions.
+        volkLoadDevice(gd->vkDevice);
+
+        vkGetDeviceQueue(gd->vkDevice, gd->vkQueueIndex, 0, &gd->vkQueue);
+    }
+
+    // init the command buffer for submit.
+    {
+        VkCommandPoolCreateInfo cmd_pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        //cmd_pool_info.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT; // command buffers alloc from pool are short-lived.
+        cmd_pool_info.queueFamilyIndex = gd->vkQueueIndex;
+        VK_CHECK(vkCreateCommandPool(gd->vkDevice, &cmd_pool_info, nullptr, &gd->commandPool));
+
+        VkCommandBufferAllocateInfo cmd_buf_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cmd_buf_info.commandPool                 = gd->commandPool;
+        cmd_buf_info.level                       = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_buf_info.commandBufferCount          = 1;
+        VK_CHECK(vkAllocateCommandBuffers(gd->vkDevice, &cmd_buf_info, &gd->cmdBuf));
+    }
+
+    // create the pipeline layout.
+    {
+        VkDescriptorSetLayoutCreateInfo ci            = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        VkDescriptorSetLayoutBinding    cpuTexBinding = {
+            1,  //binding.
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            1,  //count.
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            nullptr  //samplers.
+        };           // TODO: we definitely want to be using the C99 designated initializers.
+        ci.bindingCount = 1;
+        ci.pBindings    = &cpuTexBinding;
+        VK_CHECK(vkCreateDescriptorSetLayout(gd->vkDevice,
+            &ci,
+            nullptr,  // allocator.
+            &gd->descSet));
+
+        VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        li.setLayoutCount             = 1;  //1 descriptor set layout.
+        li.pSetLayouts                = &gd->descSet;
+        VK_CHECK(vkCreatePipelineLayout(gd->vkDevice, &li, nullptr, &gd->pipelineLayout));
+    }
+
+// create the compute pipeline.
+#if 1
+    {
+        const char                     *shaderEntry = "copy_shader";
+        VkPipelineShaderStageCreateInfo stageInfo   = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stageInfo.pName                             = shaderEntry;
+        stageInfo.stage                             = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageInfo.module                            = ae::VK::loadShaderModule(gd->vkDevice,
+            "res\\shader.hlsl",
+            L"copy_shader",
+            L"cs_6_0"  // TODO: is there a way to verify that this is the same as shaderEntry above?
+        );
+
+        VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage                       = stageInfo;
+
+        ci.layout = gd->pipelineLayout;
+        vkCreateComputePipelines(gd->vkDevice,
+            VK_NULL_HANDLE,  //pipeline cache.
+            1,               //createInfoCount,
+            &ci,
+            nullptr,  // allocation callbacks.
+            &gd->vkComputePipeline);
+    }
+#endif
+
+    ae::game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
+
+    // find a heap that is a good and nice one :D
+    {
+        // TODO: this guy below maybe is an AE thing.
+        VkPhysicalDeviceMemoryProperties deviceMemoryProperties;
+
+        auto getDesiredMemoryTypeIndex = [&](VkMemoryPropertyFlags positiveProp,
+                                             VkMemoryPropertyFlags negativeProp) -> uint32_t {
+            vkGetPhysicalDeviceMemoryProperties(gd->vkGpu, &deviceMemoryProperties);
+            for (uint32_t i = 0; i < deviceMemoryProperties.memoryTypeCount; i++) {
+                auto flags = deviceMemoryProperties.memoryTypes[i].propertyFlags;
+                if (((flags & positiveProp) == positiveProp) && ((flags & negativeProp) == 0)) { return i; }
+            }
+            AELoggerError("Could not find a heap with a suitable memory type!");
+            assert(false);  //TODO.
+        };
+
+        gd->vkUploadHeapIdx =
+            getDesiredMemoryTypeIndex(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | VK_MEMORY_PROPERTY_PROTECTED_BIT);
+
+        gd->vkVramHeapIdx =
+            getDesiredMemoryTypeIndex(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    }
+
+    // create the texture resource.
+    {
+        // TODO: helpers for image/buffer creation seem like a nice idea maybe.
+
+        VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+
+        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ci.imageType         = VK_IMAGE_TYPE_2D;
+        ci.format            = format;
+        ci.extent            = {winInfo.width, winInfo.height, 1};
+        ci.mipLevels         = 1;
+        ci.arrayLayers       = 1;
+        ci.samples           = VK_SAMPLE_COUNT_1_BIT;
+        ci.usage             = VK_IMAGE_USAGE_STORAGE_BIT;
+        ci.initialLayout     = VK_IMAGE_LAYOUT_GENERAL;  // NOTE: must be this or pre-initialized.
+        ci.tiling            = VK_IMAGE_TILING_LINEAR;
+
+        // Provided by VK_VERSION_1_0
+        VK_CHECK(vkCreateImage(gd->vkDevice, &ci, nullptr, &gd->vkCpuTex));
+        VkMemoryRequirements imageReq;
+        (vkGetImageMemoryRequirements(gd->vkDevice, gd->vkCpuTex, &imageReq));
+
+        VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize       = ae::math::align_up(imageReq.size, imageReq.alignment);  //TODO.
+        allocInfo.memoryTypeIndex      = gd->vkVramHeapIdx;
+
+        gd->vkCpuTexSize = allocInfo.allocationSize;
+
+        // bind this to some memory.
+        vkAllocateMemory(gd->vkDevice, &allocInfo, nullptr, &gd->vkCpuTexBacking);
+
+        VK_CHECK(vkBindImageMemory(gd->vkDevice,
+            gd->vkCpuTex,
+            gd->vkCpuTexBacking,
+            0));  // so this offset is how we can do placed resources effectively ...
+
+        // create the image view.
+        VkImageViewCreateInfo imageViewCI = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        imageViewCI.image                 = gd->vkCpuTex;
+        imageViewCI.viewType              = VK_IMAGE_VIEW_TYPE_2D;
+        imageViewCI.format                = format;
+        imageViewCI.subresourceRange      = {VK_IMAGE_ASPECT_COLOR_BIT,  //aspect mask
+                 0,                                                      //base mip
+                 VK_REMAINING_MIP_LEVELS,
+                 0,  //base array,
+                 VK_REMAINING_ARRAY_LAYERS};
+
+        VK_CHECK(vkCreateImageView(gd->vkDevice, &imageViewCI, nullptr, &gd->vkCpuTexView));
+
+        // create the buffer to store the row major form of the texture.
+        {
+            VkBufferCreateInfo bufCI = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bufCI.size               = gd->vkCpuTexSize;
+            bufCI.usage              = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+            vkCreateBuffer(gd->vkDevice, &bufCI, nullptr, &gd->vkCpuTexBuffer);
+
+            VkMemoryRequirements bufferReq;
+            (vkGetBufferMemoryRequirements(gd->vkDevice, gd->vkCpuTexBuffer, &bufferReq));
+
+            VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocInfo.allocationSize       = ae::math::align_up(bufferReq.size, bufferReq.alignment);  //TODO.
+            allocInfo.memoryTypeIndex      = gd->vkUploadHeapIdx;
+
+            gd->vkCpuTexBufferSize = allocInfo.allocationSize;
+
+            vkAllocateMemory(gd->vkDevice, &allocInfo, nullptr, &gd->vkCpuTexBufferBacking);
+
+            VK_CHECK(vkBindBufferMemory(gd->vkDevice,
+                gd->vkCpuTexBuffer,
+                gd->vkCpuTexBufferBacking,
+                0));  // so this offset is how we can do placed resources effectively - we can bind to an offset in the memory.
+        }
+    }
+
+    // create the descriptor set for use with our copy_shader idea.
+    {
+        // NOTE: this kind of API here is really not making sense to me. TODO.
+        // why is it that I specify the pools (which describe the shape of this pool, and therefore the max descriptors that can be made).
+        // I think the idea is that a descriptor set is a higher level structure, so its like the set pulls from the lower-level pools.
+        // just, really odd.
+
+        // begin by create the pool.
+        VkDescriptorPoolSize       pools[1] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
+        VkDescriptorPoolCreateInfo ci       = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        ci.maxSets                          = 1;  //TODO.
+        ci.poolSizeCount                    = _countof(pools);
+        ci.pPoolSizes                       = pools;
+        VK_CHECK(vkCreateDescriptorPool(gd->vkDevice, &ci, nullptr, &gd->descPool));
+
+        VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocInfo.descriptorSetCount          = 1;
+        allocInfo.descriptorPool              = gd->descPool;
+        allocInfo.pSetLayouts                 = &gd->descSet;
+
+        VK_CHECK(vkAllocateDescriptorSets(gd->vkDevice, &allocInfo, &gd->theDescSet));
+
+        // do the thing!!!
+        VkDescriptorImageInfo imageInfo = {
+            VK_NULL_HANDLE,  // sampler.
+            gd->vkCpuTexView,
+            VK_IMAGE_LAYOUT_GENERAL  // layout at the time of access through this descriptor.
+        };
+        VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet               = gd->theDescSet;
+        write.dstBinding           = 1;  // binding within set to write.
+        write.descriptorCount      = 1;
+        write.descriptorType       = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write.pImageInfo           = &imageInfo;
+        vkUpdateDescriptorSets(gd->vkDevice,
+            1,  // write count.
+            &write,
+            0,       //copy count.
+            nullptr  // copies.
+        );
+    }
+
+    // start recording the cmd buffer to do the good copy work :D
+    {
+        auto cmd = gd->cmdBuf;
+
+        VkCommandBufferBeginInfo beginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+        auto emitSingleImageBarrier = [&](VkAccessFlags        src,
+                                          VkAccessFlags        dst,
+                                          VkImageLayout        srcLayout,
+                                          VkImageLayout        dstLayout,
+                                          VkImage              img,
+                                          VkPipelineStageFlags before,
+                                          VkPipelineStageFlags after) {
+            VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            barrier.srcAccessMask        = src;
+            barrier.dstAccessMask        = dst;
+            barrier.oldLayout            = srcLayout;
+            barrier.newLayout            = dstLayout;
+            barrier.image                = img;
+            vkCmdPipelineBarrier(cmd,
+                before,   //NOTE: no need to sync with anything before. we stall GPU between cmd buffers of this kind.
+                after,    // dst stage.
+                0,        //dependencyFlags,
+                0,        //                                   memoryBarrierCount,
+                nullptr,  //                      pMemoryBarriers,
+                0,        //                               bufferMemoryBarrierCount,
+                nullptr,  //                pBufferMemoryBarriers,
+                1,        //                                    imageMemoryBarrierCount,
+                &barrier);
+        };
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gd->vkComputePipeline);
+        vkCmdBindDescriptorSets(cmd,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            gd->pipelineLayout,
+            0,  // set number of first descriptor to bind.
+            1,
+            &gd->theDescSet,  // const VkDescriptorSet*                      pDescriptorSets,
+            0,                // dynamic offsets
+            nullptr           // ^
+        );
+
+        // dispatch using the bound pipeline.
+        vkCmdDispatch(cmd, ae::math::div_ceil(winInfo.width, 16), ae::math::div_ceil(winInfo.height, 16), 1);
+
+        emitSingleImageBarrier(VK_ACCESS_SHADER_WRITE_BIT,  // sync with prior shader writes.
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            gd->vkCpuTex,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        VkBufferImageCopy region = {
+            0,  // buffer offset.
+            0,  // buffer len
+            0,  // buffer height
+            // VkImageSubresourceLayers
+            {
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,  // mip level.
+                0,  //array base.
+                1   //array layers
+            },
+            {0, 0, 0},                                                      //offset
+            {gameMemory->backbufferWidth, gameMemory->backbufferHeight, 1}  //extent.
+        };
+        vkCmdCopyImageToBuffer(cmd, gd->vkCpuTex, VK_IMAGE_LAYOUT_GENERAL, gd->vkCpuTexBuffer, 1, &region);
+
+        // NOTE: for this barrier we do not care about sync since we always wait for this command list.
+        emitSingleImageBarrier(VK_ACCESS_TRANSFER_READ_BIT,
+            VK_ACCESS_NONE,
+            VK_IMAGE_LAYOUT_UNDEFINED,  //discard is OK.
+            VK_IMAGE_LAYOUT_GENERAL,
+            gd->vkCpuTex,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_NONE);
+
+        // TODO: do we need to transfer the buffer to be in the general layout for CPU reading??
+
+        //        hr = (cmd->Close());
+        VK_CHECK(vkEndCommandBuffer(cmd));
+    }
+
+    // create the fence so that we can do the waiting stuff.
+    {
+        VkFenceCreateInfo ci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vkCreateFence(gd->vkDevice, &ci, nullptr, &gd->vkFence));
+    }
+
+#undef VK_CHECK
+}
+
+#endif  // AUTOMATA_ENGINE_VK_BACKEND
+
+#if AUTOMATA_ENGINE_DX12_BACKEND
 void InitD3D12(game_data *gd)
 {
     HRESULT hr;
@@ -873,7 +1498,7 @@ void InitD3D12(game_data *gd)
         defer(COM_RELEASE(computeShader));
 
         const char *shaderFilePath = "res\\shader.hlsl";
-        bool        r              = ae::DX::compileShader(shaderFilePath, L"copy_shader", L"cs_6_0", &computeShader);
+        bool        r = ae::HLSL::compileBlobFromFile(shaderFilePath, L"copy_shader", L"cs_6_0", &computeShader);
         if (!r || !computeShader) {
             // compileshader will print already.
             return;
@@ -916,7 +1541,7 @@ void InitD3D12(game_data *gd)
         // TODO: this is dumb because we are compiling the same file twice,
         // plus reading it from disk twice.
         const char *shaderFilePath = "res\\shader.hlsl";
-        bool        r              = ae::DX::compileShader(shaderFilePath,
+        bool        r              = ae::HLSL::compileBlobFromFile(shaderFilePath,
             L"",  // TODO:empty entry works??,
             L"lib_6_3",
             &rayLib);
@@ -1620,3 +2245,5 @@ void InitD3D12(game_data *gd)
 
 #undef INIT_FAIL_CHECK
 }
+
+#endif // #if AUTOMATA_ENGINE_DX12_BACKEND

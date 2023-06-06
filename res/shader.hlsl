@@ -1,8 +1,8 @@
 
 RWTexture2D<float4> gpuTex : register(u0); // maps to 0th UAV register.
+
+[[vk::binding(1, 0)]] // NOTE: the binding goes as first number is the register, and the second number is the descriptor set.
 RWTexture2D<float4> cpuTex : register(u1); // maps to 1st UAV register.
-
-
 
 // so, when we div_ceil on the numthreads number, does that produce
 // a "leftover" threadgroup where the occupancy is like, not full?
@@ -10,9 +10,10 @@ RWTexture2D<float4> cpuTex : register(u1); // maps to 1st UAV register.
 [numthreads(16, 16, 1)]
 void copy_shader(uint3 DTid : SV_DispatchThreadID)
 {	
-    cpuTex[DTid.xy] = gpuTex.Load(DTid.xy);
+    //cpuTex[DTid.xy] = gpuTex.Load(DTid.xy);
     // swizzle the colors because our output surface expects so.
-    cpuTex[DTid.xy].rgba = cpuTex[DTid.xy].bgra;
+    //cpuTex[DTid.xy].rgba = cpuTex[DTid.xy].bgra;
+cpuTex[DTid.xy]=float4(1,0,0,1);
 }
 
 
