@@ -22,7 +22,18 @@ enum app_mode { APP_MODE_DXR, APP_MODE_VK, APP_MODE_CPU };
 #if AUTOMATA_ENGINE_DX12_BACKEND
 static app_mode g_appMode = APP_MODE_DXR;
 #elif AUTOMATA_ENGINE_VK_BACKEND
+
 static app_mode g_appMode = APP_MODE_VK;
+void            WaitForAndResetFence(VkDevice device, VkFence *pFence, uint64_t waitTime = 1000 * 1000 * 1000);
+void            emitSingleImageBarrier(VkCommandBuffer cmd,
+               VkAccessFlags                           src,
+               VkAccessFlags                           dst,
+               VkImageLayout                           srcLayout,
+               VkImageLayout                           dstLayout,
+               VkImage                                 img,
+               VkPipelineStageFlags                    before,
+               VkPipelineStageFlags                    after);
+
 #endif
 
 // a nice helper + forward decls.
@@ -32,6 +43,7 @@ void              InitVK(ae::game_memory_t *gameMemory);
 void              visualizer(ae::game_memory_t *gameMemory);
 static image_32_t AllocateImage(unsigned int width, unsigned int height);
 DWORD WINAPI      master_thread(_In_ LPVOID lpParameter);
+dxr_world         SCENE_TO_DXR_WORLD();
 
 /*
 THE MISSION ::
@@ -400,24 +412,17 @@ void blitToGameBackbuffer(ae::game_memory_t *gameMemory)
 // TODO: put the vk_check idea in the block below.
 #if AUTOMATA_ENGINE_VK_BACKEND
 
-    // kick off the work.
-    VkSubmitInfo si       = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &gd->cmdBuf;
-    (vkQueueSubmit(gd->vkQueue, 1, &si, gd->vkFence));
+    // NOTE: only one thread can submit to the queue at a time.
+    {
+        std::lock_guard<std::mutex> lock(g_commandQueueMutex);
+        VkSubmitInfo                si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount          = 1;
+        si.pCommandBuffers             = &gd->cmdBuf;
+        (vkQueueSubmit(gd->vkQueue, 1, &si, gd->vkFence));
+    }
 
     // wait for the work.
-    VkResult result = (vkWaitForFences(gd->vkDevice,
-        1,
-        &gd->vkFence,
-        VK_TRUE,               //wait until all the fences are signaled. this blocks the CPU thread.
-        1000 * 1000 * 1000));  // wait for 1s as a timeout?
-    if (result == VK_SUCCESS) {
-        // reset fences back to unsignaled so that can use em' again;
-        vkResetFences(gd->vkDevice, 1, &gd->vkFence);
-    } else {
-        AELoggerError("some error occurred during the fence wait thing., %s", ae::VK::VkResultToString(result));
-    }
+    WaitForAndResetFence(gd->vkDevice, &gd->vkFence);
 
     size_t size = gameMemory->backbufferWidth * gameMemory->backbufferHeight * sizeof(int);
 
@@ -428,7 +433,7 @@ void blitToGameBackbuffer(ae::game_memory_t *gameMemory)
     int   flags = 0;
     void *data  = nullptr;
     // TODO: we should keep this memory persistently mapped.
-    result = vkMapMemory(gd->vkDevice, thingToMap, mapOffset, mapSize, flags, &data);
+    VkResult result = vkMapMemory(gd->vkDevice, thingToMap, mapOffset, mapSize, flags, &data);
     if (result == VK_SUCCESS && data) {
         // make the GPU writes to mapped region visible so that CPU can do the reading
         VkMappedMemoryRange range = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
@@ -532,6 +537,87 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter)
         switch (g_appMode)
 
         {
+#if AUTOMATA_ENGINE_VK_BACKEND
+            case APP_MODE_VK: {
+                auto  tIdx = threadData->threadIdx;
+                auto &cmd  = gd->rayCmdBufs[tIdx];
+
+                VkCommandBufferBeginInfo beginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                (vkBeginCommandBuffer(cmd, &beginInfo));
+
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, gd->vkRayPipeline);
+                vkCmdBindDescriptorSets(cmd,
+                    VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                    gd->pipelineLayout,
+                    0,  // set # of first desc set to bind.
+                    1,  // desc sets.
+                    &gd->theDescSet,
+                    // the two fields below are for dynamic offsets or whatever.
+                    0,
+                    nullptr);
+
+                struct {
+                    unsigned int xPos;
+                    unsigned int yPos;
+                    unsigned int seed;
+                    unsigned int width;
+                    unsigned int height;
+                } constants = {
+                    texel.xPos, texel.yPos, (unsigned int)(ae::timing::epoch()), g_image.width, g_image.height};
+
+                vkCmdPushConstants(cmd,
+                    gd->pipelineLayout,
+                    VK_SHADER_STAGE_ALL,  //TODO: maybe we can get more granular about this.
+                    0,                    //offset.
+                    sizeof(constants),
+                    &constants);
+
+                auto shaderTableAddr = ae::VK::getBufferVirtAddr(gd->vkDevice, gd->vkShaderTable);
+
+                size_t tableElemSize  = gd->vkShaderGroupHandleSize;
+                size_t tableAlignment = gd->vkShaderGroupTableAlignment;
+
+                auto stride = tableElemSize;
+                auto size   = tableElemSize;
+
+                VkStridedDeviceAddressRegionKHR raygenTable = {shaderTableAddr, stride, size};
+
+                VkStridedDeviceAddressRegionKHR missTable = {shaderTableAddr + tableAlignment, stride, size};
+
+                VkStridedDeviceAddressRegionKHR hitShaderTable = {shaderTableAddr + tableAlignment * 2, stride, size};
+
+                VkStridedDeviceAddressRegionKHR callableShaderTable = {
+                    // NOTE: this is valid for us to do with the VK API,
+                    // but from an API standpoint I would have preffered that we
+                    // are able to pass nullptr as the table.
+                };
+
+                vkCmdTraceRaysKHR(
+                    cmd, &raygenTable, &missTable, &hitShaderTable, &callableShaderTable, texel.width, texel.height, 1);
+
+                (vkEndCommandBuffer(cmd));
+
+                auto &fence = gd->rayFences[tIdx];
+                // NOTE: only one thread can submit to the queue at a time.
+                {
+                    std::lock_guard<std::mutex> lock(g_commandQueueMutex);
+                    VkSubmitInfo                si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    si.commandBufferCount          = 1;
+                    si.pCommandBuffers             = &cmd;
+                    (vkQueueSubmit(gd->vkQueue, 1, &si, fence));
+                }
+
+                // wait for the work.
+                WaitForAndResetFence(gd->vkDevice, &fence);
+
+                // TODO: add vk_check here.
+                (vkResetCommandBuffer(cmd, 0));
+                (vkResetCommandPool(gd->vkDevice, gd->rayCommandPools[tIdx], 0));
+
+            } break;
+
+#endif
+
 #if AUTOMATA_ENGINE_DX12_BACKEND
             case APP_MODE_DXR: {
                 HRESULT hr;
@@ -1067,10 +1153,34 @@ void InitVK(ae::game_memory_t *gameMemory)
         StretchyBufferPush(required_device_extensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
         StretchyBufferPush(required_device_extensions, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
         StretchyBufferPush(required_device_extensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+        StretchyBufferPush(required_device_extensions, VK_KHR_RAY_QUERY_EXTENSION_NAME);
         if (!validateExtensions(required_device_extensions, device_extensions)) {
             AELoggerError("missing required device extensions");
             return;  //throw std::exception();
         }
+
+        // add some additional features from the device to request.
+        //TODO: we need to actually check the card for support for all these features below.
+
+        // TODO: currently I understand that the buffer device feature is so that we can access buffer data in shader where that device address is maybe an offset
+        //       into some memory, without a VkBuffer. something like that??
+
+        VkPhysicalDeviceVulkan12Features superCoolFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        superCoolFeatures.bufferDeviceAddress              = VK_TRUE;
+
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR evenMoreFeatures = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+        evenMoreFeatures.pNext                 = &superCoolFeatures;
+        evenMoreFeatures.accelerationStructure = VK_TRUE;
+
+        VkPhysicalDeviceRayTracingPipelineFeaturesKHR moreFeatures = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};  //::rayTracingPipeline
+        moreFeatures.pNext              = &evenMoreFeatures;
+        moreFeatures.rayTracingPipeline = VK_TRUE;
+
+        VkPhysicalDeviceRayQueryFeaturesKHR features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+        features.rayQuery                            = VK_TRUE;
+        features.pNext                               = &moreFeatures;
 
         VkDeviceQueueCreateInfo queue_info     = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
         const float             queue_priority = 1.0f;
@@ -1079,6 +1189,7 @@ void InitVK(ae::game_memory_t *gameMemory)
         queue_info.pQueuePriorities            = &queue_priority;
 
         VkDeviceCreateInfo device_info      = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+        device_info.pNext                   = &features;  // requested features.
         device_info.queueCreateInfoCount    = 1;
         device_info.pQueueCreateInfos       = &queue_info;
         device_info.enabledExtensionCount   = StretchyBufferCount(required_device_extensions);
@@ -1092,45 +1203,93 @@ void InitVK(ae::game_memory_t *gameMemory)
         vkGetDeviceQueue(gd->vkDevice, gd->vkQueueIndex, 0, &gd->vkQueue);
     }
 
-    // init the command buffer for submit.
+    // init the command buffer(s) for submit.
     {
-        VkCommandPoolCreateInfo cmd_pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-        //cmd_pool_info.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT; // command buffers alloc from pool are short-lived.
-        cmd_pool_info.queueFamilyIndex = gd->vkQueueIndex;
-        VK_CHECK(vkCreateCommandPool(gd->vkDevice, &cmd_pool_info, nullptr, &gd->commandPool));
+        auto makeCmdBuf = [&](VkCommandPool *poolOut, VkCommandBuffer *bufOut) {
+            VkCommandPoolCreateInfo cmd_pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            //cmd_pool_info.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT; // command buffers alloc from pool are short-lived.
+            cmd_pool_info.queueFamilyIndex = gd->vkQueueIndex;
+            cmd_pool_info.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            VK_CHECK(vkCreateCommandPool(gd->vkDevice, &cmd_pool_info, nullptr, poolOut));
 
-        VkCommandBufferAllocateInfo cmd_buf_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        cmd_buf_info.commandPool                 = gd->commandPool;
-        cmd_buf_info.level                       = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cmd_buf_info.commandBufferCount          = 1;
-        VK_CHECK(vkAllocateCommandBuffers(gd->vkDevice, &cmd_buf_info, &gd->cmdBuf));
+            VkCommandBufferAllocateInfo cmd_buf_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+            cmd_buf_info.commandPool                 = *poolOut;
+            cmd_buf_info.level                       = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cmd_buf_info.commandBufferCount          = 1;
+            VK_CHECK(vkAllocateCommandBuffers(gd->vkDevice, &cmd_buf_info, bufOut));
+        };
+
+        makeCmdBuf(&gd->commandPool, &gd->cmdBuf);
+
+        for (int it = 0; it < THREAD_COUNT; it++) {
+            makeCmdBuf(&gd->rayCommandPools[it], &gd->rayCmdBufs[it]);
+            VkFenceCreateInfo ci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            VK_CHECK(vkCreateFence(gd->vkDevice, &ci, nullptr, &gd->rayFences[it]));
+        }
     }
 
     // create the pipeline layout.
     {
-        VkDescriptorSetLayoutCreateInfo ci            = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        VkDescriptorSetLayoutBinding    cpuTexBinding = {
+        // we have two UAV textures to bind.
+        // we have one CBV to bind, and another CBV that maps to push constants.
+        // then we have the SRV acceleration structure to bind.
+
+        VkDescriptorSetLayoutCreateInfo ci = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+
+        VkDescriptorSetLayoutBinding bindings[4] = {};
+        bindings[0]                              = {
+            0,  //binding.
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            1,                    //count.
+            VK_SHADER_STAGE_ALL,  //TODO: hopefully this includes the raytracing stuff.
+            nullptr               //samplers.
+        };
+        bindings[1] = {
             1,  //binding.
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            1,  //count.
-            VK_SHADER_STAGE_COMPUTE_BIT,
+            1,                    //count.
+            VK_SHADER_STAGE_ALL,  //TODO: hopefully this includes the raytracing stuff.
+            nullptr               //samplers.
+        };
+        bindings[2] = {
+            2,  //binding.
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            1,                    //count.
+            VK_SHADER_STAGE_ALL,  //TODO: hopefully this includes the raytracing stuff.
+            nullptr               //samplers.
+        };
+        bindings[3] = {
+            3,
+            VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+            1,
+            VK_SHADER_STAGE_ALL,
             nullptr  //samplers.
-        };           // TODO: we definitely want to be using the C99 designated initializers.
-        ci.bindingCount = 1;
-        ci.pBindings    = &cpuTexBinding;
+        };
+
+        ci.bindingCount = _countof(bindings);
+        ci.pBindings    = bindings;
+
         VK_CHECK(vkCreateDescriptorSetLayout(gd->vkDevice,
             &ci,
             nullptr,  // allocator.
             &gd->descSet));
 
+        VkPushConstantRange consts = {
+            VK_SHADER_STAGE_ALL,
+            0,               //offset.
+            5 * sizeof(int)  //size
+        };
         VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         li.setLayoutCount             = 1;  //1 descriptor set layout.
         li.pSetLayouts                = &gd->descSet;
+        li.pushConstantRangeCount     = 1;
+        li.pPushConstantRanges        = &consts;
+
         VK_CHECK(vkCreatePipelineLayout(gd->vkDevice, &li, nullptr, &gd->pipelineLayout));
     }
 
-// create the compute pipeline.
-#if 1
+    // create the compute pipeline.
+
     {
         const char                     *shaderEntry = "copy_shader";
         VkPipelineShaderStageCreateInfo stageInfo   = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -1146,14 +1305,13 @@ void InitVK(ae::game_memory_t *gameMemory)
         ci.stage                       = stageInfo;
 
         ci.layout = gd->pipelineLayout;
-        vkCreateComputePipelines(gd->vkDevice,
+        VK_CHECK(vkCreateComputePipelines(gd->vkDevice,
             VK_NULL_HANDLE,  //pipeline cache.
             1,               //createInfoCount,
             &ci,
             nullptr,  // allocation callbacks.
-            &gd->vkComputePipeline);
+            &gd->vkComputePipeline));
     }
-#endif
 
     ae::game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
 
@@ -1181,82 +1339,375 @@ void InitVK(ae::game_memory_t *gameMemory)
             getDesiredMemoryTypeIndex(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     }
 
-    // create the texture resource.
+    // create some resources.
+    size_t worldSize = sizeof(dxr_world);
     {
-        // TODO: helpers for image/buffer creation seem like a nice idea maybe.
-
         VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 
-        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        ci.imageType         = VK_IMAGE_TYPE_2D;
-        ci.format            = format;
-        ci.extent            = {winInfo.width, winInfo.height, 1};
-        ci.mipLevels         = 1;
-        ci.arrayLayers       = 1;
-        ci.samples           = VK_SAMPLE_COUNT_1_BIT;
-        ci.usage             = VK_IMAGE_USAGE_STORAGE_BIT;
-        ci.initialLayout     = VK_IMAGE_LAYOUT_GENERAL;  // NOTE: must be this or pre-initialized.
-        ci.tiling            = VK_IMAGE_TILING_LINEAR;
+        gd->vkCpuTexSize = ae::VK::createImage2D_dumb(gd->vkDevice,
+            winInfo.width,
+            winInfo.height,
+            gd->vkVramHeapIdx,
+            format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            &gd->vkCpuTex,
+            &gd->vkCpuTexBacking);
 
-        // Provided by VK_VERSION_1_0
-        VK_CHECK(vkCreateImage(gd->vkDevice, &ci, nullptr, &gd->vkCpuTex));
-        VkMemoryRequirements imageReq;
-        (vkGetImageMemoryRequirements(gd->vkDevice, gd->vkCpuTex, &imageReq));
+        // NOTE: this be the one that we going to raytrace into :)
+        gd->vkGpuTexSize = ae::VK::createImage2D_dumb(gd->vkDevice,
+            winInfo.width,
+            winInfo.height,
+            gd->vkVramHeapIdx,
+            format,
+            VK_IMAGE_USAGE_STORAGE_BIT,
+            &gd->vkGpuTex,
+            &gd->vkGpuTexBacking);
 
-        VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocInfo.allocationSize       = ae::math::align_up(imageReq.size, imageReq.alignment);  //TODO.
-        allocInfo.memoryTypeIndex      = gd->vkVramHeapIdx;
+        auto makeDumbView = [&](VkImage img, VkImageView *viewOut) {
+            // create the image view(s).
+            VkImageViewCreateInfo imageViewCI = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            imageViewCI.image                 = img;
+            imageViewCI.viewType              = VK_IMAGE_VIEW_TYPE_2D;
+            imageViewCI.format                = format;
+            imageViewCI.subresourceRange      = {VK_IMAGE_ASPECT_COLOR_BIT,  //aspect mask
+                     0,                                                      //base mip
+                     VK_REMAINING_MIP_LEVELS,
+                     0,  //base array,
+                     VK_REMAINING_ARRAY_LAYERS};
 
-        gd->vkCpuTexSize = allocInfo.allocationSize;
+            VK_CHECK(vkCreateImageView(gd->vkDevice, &imageViewCI, nullptr, viewOut));
+        };
 
-        // bind this to some memory.
-        vkAllocateMemory(gd->vkDevice, &allocInfo, nullptr, &gd->vkCpuTexBacking);
+        makeDumbView(gd->vkCpuTex, &gd->vkCpuTexView);
 
-        VK_CHECK(vkBindImageMemory(gd->vkDevice,
-            gd->vkCpuTex,
-            gd->vkCpuTexBacking,
-            0));  // so this offset is how we can do placed resources effectively ...
-
-        // create the image view.
-        VkImageViewCreateInfo imageViewCI = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        imageViewCI.image                 = gd->vkCpuTex;
-        imageViewCI.viewType              = VK_IMAGE_VIEW_TYPE_2D;
-        imageViewCI.format                = format;
-        imageViewCI.subresourceRange      = {VK_IMAGE_ASPECT_COLOR_BIT,  //aspect mask
-                 0,                                                      //base mip
-                 VK_REMAINING_MIP_LEVELS,
-                 0,  //base array,
-                 VK_REMAINING_ARRAY_LAYERS};
-
-        VK_CHECK(vkCreateImageView(gd->vkDevice, &imageViewCI, nullptr, &gd->vkCpuTexView));
+        makeDumbView(gd->vkGpuTex, &gd->vkGpuTexView);
 
         // create the buffer to store the row major form of the texture.
-        {
-            VkBufferCreateInfo bufCI = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bufCI.size               = gd->vkCpuTexSize;
-            bufCI.usage              = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        gd->vkCpuTexBufferSize = ae::VK::createBufferDumb(gd->vkDevice,
+            gd->vkCpuTexSize,
+            gd->vkUploadHeapIdx,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &gd->vkCpuTexBuffer,
+            &gd->vkCpuTexBufferBacking);
 
-            vkCreateBuffer(gd->vkDevice, &bufCI, nullptr, &gd->vkCpuTexBuffer);
+        // create the buffer for storing the scene constant data.
+        void *data;
 
-            VkMemoryRequirements bufferReq;
-            (vkGetBufferMemoryRequirements(gd->vkDevice, gd->vkCpuTexBuffer, &bufferReq));
+        size_t worldActualSize = ae::VK::createUploadBufferDumb(gd->vkDevice,
+            worldSize,
+            gd->vkUploadHeapIdx,
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            &gd->vkWorldBuffer,
+            &gd->vkWorldBufferBacking,
+            &data);
+        assert(worldSize <= worldActualSize);
+        auto mappedThing = gd->vkWorldBufferBacking;
+        if (worldActualSize && data) {
+            // write the world data teehee.
+            dxr_world w = SCENE_TO_DXR_WORLD();
+            memcpy(data, &w, worldSize);
 
-            VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-            allocInfo.allocationSize       = ae::math::align_up(bufferReq.size, bufferReq.alignment);  //TODO.
-            allocInfo.memoryTypeIndex      = gd->vkUploadHeapIdx;
-
-            gd->vkCpuTexBufferSize = allocInfo.allocationSize;
-
-            vkAllocateMemory(gd->vkDevice, &allocInfo, nullptr, &gd->vkCpuTexBufferBacking);
-
-            VK_CHECK(vkBindBufferMemory(gd->vkDevice,
-                gd->vkCpuTexBuffer,
-                gd->vkCpuTexBufferBacking,
-                0));  // so this offset is how we can do placed resources effectively - we can bind to an offset in the memory.
+            ae::VK::flushAndUnmapUploadBuffer(gd->vkDevice, worldSize, gd->vkWorldBufferBacking);
         }
     }
 
-    // create the descriptor set for use with our copy_shader idea.
+    // create the fence so that we can do the waiting stuff.
+    {
+        VkFenceCreateInfo ci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vkCreateFence(gd->vkDevice, &ci, nullptr, &gd->vkFence));
+    }
+
+    // setup the acceleration structures.
+    {
+        // TODO: we are going to require TWO blas.
+        //
+        // do that blas stuff.
+        VkAccelerationStructureBuildSizesInfoKHR blasPrebuildInfo = {
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+
+        constexpr uint32_t  aabbCount    = 1;
+        size_t              aabbDataSize = sizeof(VkAabbPositionsKHR);  // TODO.
+        VkAabbPositionsKHR *aabbData;
+        ae::VK::createUploadBufferDumb(gd->vkDevice,
+            aabbDataSize,
+            gd->vkUploadHeapIdx,
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+            &gd->vkAabbBuffer,
+            &gd->vkAabbBufferBacking,
+            (void **)&aabbData);
+
+        if (aabbData) {
+            auto &aabb = aabbData[0];
+            // write.
+            aabb.minX = -1;
+            aabb.minY = -1;
+            aabb.minZ = -1;
+            aabb.maxX = 1;
+            aabb.maxY = 1;
+            aabb.maxZ = 1;
+
+            // flush and unmap.
+            ae::VK::flushAndUnmapUploadBuffer(gd->vkDevice, aabbDataSize, gd->vkAabbBufferBacking);
+        }
+
+        VkAccelerationStructureGeometryKHR sphereGeo = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        sphereGeo.geometryType                       = VK_GEOMETRY_TYPE_AABBS_KHR;
+        sphereGeo.geometry.aabbs.sType               = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+        sphereGeo.geometry.aabbs.stride              = sizeof(VkAabbPositionsKHR);
+        sphereGeo.geometry.aabbs.data.deviceAddress  = ae::VK::getBufferVirtAddr(gd->vkDevice, gd->vkAabbBuffer);
+
+        VkAccelerationStructureBuildGeometryInfoKHR blasBuildInfo = {
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        blasBuildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        blasBuildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        blasBuildInfo.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        blasBuildInfo.geometryCount = 1;
+        blasBuildInfo.pGeometries   = &sphereGeo;
+
+        vkGetAccelerationStructureBuildSizesKHR(gd->vkDevice,
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &blasBuildInfo,
+            &aabbCount,  // aabb counts for geometries.
+            &blasPrebuildInfo);
+
+        // create the blas buffer and blas scratch.
+        ae::VK::createBufferDumb(gd->vkDevice,
+            blasPrebuildInfo.accelerationStructureSize,
+            gd->vkVramHeapIdx,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+            &gd->vkBlasBuffer,
+            &gd->vkBlasBufferBacking);
+        // scratch.
+        ae::VK::createBufferDumb(gd->vkDevice,
+            blasPrebuildInfo.buildScratchSize,
+            gd->vkVramHeapIdx,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            &gd->vkScratch[0],
+            &gd->vkScratchBacking[0]);
+
+        // create the blas.
+        {
+            VkAccelerationStructureCreateInfoKHR ci = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+            //      createFlags;
+            ci.buffer = gd->vkBlasBuffer;  // where it will be stored, the AS is auto bound to this.
+            ci.offset = 0;                 //VkDeviceSize                             offset;
+            ci.size   = blasPrebuildInfo.accelerationStructureSize;  // size required for AS.
+            ci.type =
+                VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;  //      VkAccelerationStructureTypeKHR           type;
+
+            // NOTE: the device address is for replay stuff.
+            // VkDeviceAddress                          deviceAddress;
+
+            VK_CHECK(vkCreateAccelerationStructureKHR(gd->vkDevice, &ci, nullptr, &gd->vkBlas));
+        }
+
+        // do that tlas stuff.
+
+        VkAccelerationStructureBuildSizesInfoKHR tlasPrebuildInfo = {
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+
+        // instance data.
+        constexpr uint32_t instanceDataCount = 1;
+        size_t             instanceDataSize  = sizeof(VkAccelerationStructureInstanceKHR) * instanceDataCount;
+        VkAccelerationStructureInstanceKHR *instanceData;
+        ae::VK::createUploadBufferDumb(gd->vkDevice,
+            instanceDataSize,
+            gd->vkUploadHeapIdx,
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+            &gd->vkInstanceBuffer,
+            &gd->vkInstanceBufferBacking,
+            (void **)&instanceData);
+
+        if (instanceData) {
+            // TODO: this should be a for loop for all the instances in the world.
+            {
+                int   idx  = 0;
+                auto &inst = instanceData[0];  //[idx];
+
+                inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1;
+
+                inst.instanceCustomIndex = 0;  // TODO.
+
+                inst.mask = 0xFF;  // bitwise OR with what given on TraceRay
+                // side, and if zero, ignore.
+
+                // TODO: maybe we need this more than once, who knows.
+                VkAccelerationStructureDeviceAddressInfoKHR info = {
+                    VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+                info.accelerationStructure          = gd->vkBlas;
+                inst.accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(gd->vkDevice, &info);
+
+                // TODO:
+                inst.instanceShaderBindingTableRecordOffset = 0;
+            }
+
+            ae::VK::flushAndUnmapUploadBuffer(gd->vkDevice, instanceDataSize, gd->vkInstanceBufferBacking);
+        }
+
+        // TODO: add the other spheres, and the rest of the world.
+        VkAccelerationStructureGeometryKHR sphereInstance = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        sphereInstance.geometryType                       = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+        sphereInstance.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+        sphereInstance.geometry.instances.arrayOfPointers = VK_FALSE;
+
+        sphereInstance.geometry.instances.data.deviceAddress =
+            ae::VK::getBufferVirtAddr(gd->vkDevice, gd->vkInstanceBuffer);
+
+        VkAccelerationStructureBuildGeometryInfoKHR tlasBuildInfo = {
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        tlasBuildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        tlasBuildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        tlasBuildInfo.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        tlasBuildInfo.geometryCount = 1;
+        tlasBuildInfo.pGeometries   = &sphereInstance;
+
+        vkGetAccelerationStructureBuildSizesKHR(gd->vkDevice,
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &tlasBuildInfo,
+            &instanceDataCount,
+            &tlasPrebuildInfo);
+
+        // create the tlas buffer.
+        ae::VK::createBufferDumb(gd->vkDevice,
+            tlasPrebuildInfo.accelerationStructureSize,
+            gd->vkVramHeapIdx,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+            &gd->vkTlasBuffer,
+            &gd->vkTlasBufferBacking);
+        // scratch.
+        ae::VK::createBufferDumb(gd->vkDevice,
+            tlasPrebuildInfo.buildScratchSize,
+            gd->vkVramHeapIdx,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            &gd->vkScratch[2],
+            &gd->vkScratchBacking[2]);
+
+        // Provided by VK_KHR_acceleration_structure
+        VkAccelerationStructureCreateInfoKHR ci = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+        //      createFlags;
+        ci.buffer = gd->vkTlasBuffer;  // where it will be stored, the AS is auto bound to this.
+        ci.offset = 0;                 //VkDeviceSize                             offset;
+        ci.size   = tlasPrebuildInfo.accelerationStructureSize;  // size required for AS.
+        ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;  //      VkAccelerationStructureTypeKHR           type;
+
+        // NOTE: the device address is for replay stuff.
+        // VkDeviceAddress                          deviceAddress;
+
+        VK_CHECK(vkCreateAccelerationStructureKHR(gd->vkDevice, &ci, nullptr, &gd->vkTlas));
+
+        // update the build infos now that things exist.
+        tlasBuildInfo.scratchData.deviceAddress = ae::VK::getBufferVirtAddr(gd->vkDevice, gd->vkScratch[2]);
+        tlasBuildInfo.dstAccelerationStructure  = gd->vkTlas;
+        blasBuildInfo.scratchData.deviceAddress = ae::VK::getBufferVirtAddr(gd->vkDevice, gd->vkScratch[0]);
+        blasBuildInfo.dstAccelerationStructure  = gd->vkBlas;
+
+        // record the acceleration structure builds.
+        auto &cmd = gd->cmdBuf;
+
+        VkCommandBufferBeginInfo beginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+        // before doing the buildiong of the acceleration structures, transit the images to
+        // general layout.
+        // TODO: is this the right idea ???
+        {
+            emitSingleImageBarrier(cmd,
+                VK_ACCESS_NONE,
+                VK_ACCESS_NONE,
+                VK_IMAGE_LAYOUT_UNDEFINED,  //discard is OK.
+                VK_IMAGE_LAYOUT_GENERAL,
+                gd->vkCpuTex,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+            emitSingleImageBarrier(cmd,
+                VK_ACCESS_NONE,
+                VK_ACCESS_NONE,
+                VK_IMAGE_LAYOUT_UNDEFINED,  //discard is OK.
+                VK_IMAGE_LAYOUT_GENERAL,
+                gd->vkGpuTex,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        }
+
+        // build the lads. this is where we separate the men from the boys.
+        {
+            constexpr auto infoCount = 1u;
+
+            // NOTE: the data here is going to be static because we need to persist until we "end"
+            // the command buffer?
+            static VkAccelerationStructureBuildRangeInfoKHR blasBuildRange = {
+                1,  // prim count. TODO: i think this is same info as e.g. "AABB counts for geometries".
+                0,  // offset into AABB data.
+                0,  // only need for triangle data.
+                0   // TODO: don't think this is relevant for blas.
+            };
+            ;
+            static VkAccelerationStructureBuildRangeInfoKHR *blasBuildRanges[infoCount];
+            blasBuildRanges[0] = &blasBuildRange;
+
+            vkCmdBuildAccelerationStructuresKHR(cmd,
+                // TODO: info count here changes to 2.
+                infoCount,  // number of acceleration structures to build.
+                &blasBuildInfo,
+                (const VkAccelerationStructureBuildRangeInfoKHR *const *)blasBuildRanges);
+
+            VkBufferMemoryBarrier barrier = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            barrier.srcAccessMask         = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            barrier.dstAccessMask         = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            barrier.buffer                = gd->vkBlasBuffer;
+            barrier.offset                = 0;
+            barrier.size                  = blasPrebuildInfo.accelerationStructureSize;
+
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                0,         //dependencyFlags,
+                0,         //                                   memoryBarrierCount,
+                nullptr,   //                      pMemoryBarriers,
+                1,         //                               bufferMemoryBarrierCount,
+                &barrier,  //                pBufferMemoryBarriers,
+                0,         //                                    imageMemoryBarrierCount,
+                nullptr);
+
+            // NOTE: the data here is going to be static because we need to persist until we "end"
+            // the command buffer?
+            static VkAccelerationStructureBuildRangeInfoKHR tlasBuildRange = {
+                1,  // prim count. TODO: i think this is same info as e.g. "AABB counts for geometries".
+                0,  // offset into instance data.
+                0,
+                0  // no transform offset. TODO: not sure what this if for.
+            };
+            ;
+            static VkAccelerationStructureBuildRangeInfoKHR *tlasBuildRanges[infoCount];
+            tlasBuildRanges[0] = &tlasBuildRange;
+
+            vkCmdBuildAccelerationStructuresKHR(cmd,
+                infoCount,  // number of acceleration structures to build.
+                &tlasBuildInfo,
+                (const VkAccelerationStructureBuildRangeInfoKHR *const *)tlasBuildRanges);
+        }
+
+        // submit and wait for that work.
+        VK_CHECK(vkEndCommandBuffer(cmd));
+
+        VkSubmitInfo si       = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &cmd;
+        (vkQueueSubmit(gd->vkQueue, 1, &si, gd->vkFence));  //NOTE: not multithreaded yet.
+
+        uint64_t tenSeconds = 1000 * 1000 * 1000 * 10u;
+        WaitForAndResetFence(gd->vkDevice, &gd->vkFence, tenSeconds);
+
+        // reset the command list so that we can reuse later as the "copy" command list.
+        VK_CHECK(vkResetCommandBuffer(cmd, 0));
+        VK_CHECK(vkResetCommandPool(gd->vkDevice, gd->commandPool, 0));
+
+    }  // end setup the acceleration structure.
+
+    // create/write the descriptor set for use with all pipelines.
     {
         // NOTE: this kind of API here is really not making sense to me. TODO.
         // why is it that I specify the pools (which describe the shape of this pool, and therefore the max descriptors that can be made).
@@ -1264,11 +1715,14 @@ void InitVK(ae::game_memory_t *gameMemory)
         // just, really odd.
 
         // begin by create the pool.
-        VkDescriptorPoolSize       pools[1] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
-        VkDescriptorPoolCreateInfo ci       = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        ci.maxSets                          = 1;  //TODO.
-        ci.poolSizeCount                    = _countof(pools);
-        ci.pPoolSizes                       = pools;
+        VkDescriptorPoolSize pools[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}};
+
+        VkDescriptorPoolCreateInfo ci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        ci.maxSets                    = 1;  //TODO.
+        ci.poolSizeCount              = _countof(pools);
+        ci.pPoolSizes                 = pools;
         VK_CHECK(vkCreateDescriptorPool(gd->vkDevice, &ci, nullptr, &gd->descPool));
 
         VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -1278,25 +1732,242 @@ void InitVK(ae::game_memory_t *gameMemory)
 
         VK_CHECK(vkAllocateDescriptorSets(gd->vkDevice, &allocInfo, &gd->theDescSet));
 
-        // do the thing!!!
         VkDescriptorImageInfo imageInfo = {
             VK_NULL_HANDLE,  // sampler.
             gd->vkCpuTexView,
             VK_IMAGE_LAYOUT_GENERAL  // layout at the time of access through this descriptor.
         };
-        VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet               = gd->theDescSet;
-        write.dstBinding           = 1;  // binding within set to write.
-        write.descriptorCount      = 1;
-        write.descriptorType       = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        write.pImageInfo           = &imageInfo;
+
+        VkDescriptorImageInfo imageInfo2 = {
+            VK_NULL_HANDLE,  // sampler.
+            gd->vkGpuTexView,
+            VK_IMAGE_LAYOUT_GENERAL  // layout at the time of access through this descriptor.
+        };
+
+        VkWriteDescriptorSet writes[4] = {};
+
+        writes[0].sType           = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[0].dstSet          = gd->theDescSet;
+        writes[0].dstBinding      = 1;  // binding within set to write.
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo      = &imageInfo;
+
+        writes[1].sType           = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[1].dstSet          = gd->theDescSet;
+        writes[1].dstBinding      = 0;  // binding within set to write.
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo      = &imageInfo2;
+
+        VkDescriptorBufferInfo bufferInfo = {gd->vkWorldBuffer, 0, worldSize};
+
+        writes[2].sType           = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[2].dstSet          = gd->theDescSet;
+        writes[2].dstBinding      = 2;  // binding within set to write.
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[2].pBufferInfo     = &bufferInfo;
+
+        VkWriteDescriptorSetAccelerationStructureKHR tlasInfo = {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+        tlasInfo.accelerationStructureCount = 1;
+        tlasInfo.pAccelerationStructures    = &gd->vkTlas;
+
+        writes[3].sType           = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[3].dstSet          = gd->theDescSet;
+        writes[3].dstBinding      = 3;  // binding within set to write.
+        writes[3].descriptorCount = 1;
+        writes[3].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        writes[3].pNext           = &tlasInfo;
+
         vkUpdateDescriptorSets(gd->vkDevice,
-            1,  // write count.
-            &write,
+            _countof(writes),  // write count.
+            writes,
             0,       //copy count.
             nullptr  // copies.
         );
     }
+
+    // setup the raytracing pipeline
+    constexpr size_t shaderGroupCount = 4;
+    {
+        VkRayTracingPipelineCreateInfoKHR ci = {VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
+
+        VkPipelineShaderStageCreateInfo stages[5] = {};
+        int                             idx       = 0;
+
+        auto lib = ae::VK::loadShaderModule(gd->vkDevice, "res\\shader.hlsl", L"", L"lib_6_3");
+
+        auto raygen = ae::VK::loadShaderModule(gd->vkDevice, "res\\shader.hlsl", L"ray_gen_shader", L"lib_6_3");
+
+        auto miss = ae::VK::loadShaderModule(gd->vkDevice, "res\\shader.hlsl", L"miss_main", L"lib_6_3");
+
+        auto hit = ae::VK::loadShaderModule(gd->vkDevice, "res\\shader.hlsl", L"closest_hit_simple", L"lib_6_3");
+
+        auto sphere = ae::VK::loadShaderModule(gd->vkDevice, "res\\shader.hlsl", L"intersection_sphere", L"lib_6_3");
+
+        auto plane = ae::VK::loadShaderModule(gd->vkDevice, "res\\shader.hlsl", L"intersection_plane", L"lib_6_3");
+
+        // setup stages.
+
+        // NOTE: notice that the lib var goes out of scope here and is still
+        // used as data later. this is OK since we copy the VK handle by value.
+
+        stages[idx].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[idx].stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        stages[idx].module = raygen;
+        stages[idx].pName  = "ray_gen_shader";
+        idx++;
+
+        stages[idx].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[idx].stage  = VK_SHADER_STAGE_MISS_BIT_KHR;
+        stages[idx].module = miss;
+        stages[idx].pName  = "miss_main";
+        idx++;
+
+        stages[idx].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[idx].stage  = VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+        stages[idx].module = sphere;
+        stages[idx].pName  = "intersection_sphere";
+        idx++;
+
+        stages[idx].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[idx].stage  = VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+        stages[idx].module = plane;
+        stages[idx].pName  = "intersection_plane";
+        idx++;
+
+        // TODO: the error is here, for some reason, our closest hit shader is just not working ...
+        stages[idx].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[idx].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+        stages[idx].module = hit;
+        stages[idx].pName  = "closest_hit_simple";
+        idx++;
+
+        assert(idx == _countof(stages));
+        ci.stageCount = idx;
+        ci.pStages    = stages;
+
+        VkRayTracingShaderGroupCreateInfoKHR groups[shaderGroupCount] = {};
+
+        // raygen.
+        groups[0].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[0].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        groups[0].generalShader      = 0;
+        groups[0].closestHitShader   = VK_SHADER_UNUSED_KHR;
+        groups[0].anyHitShader       = VK_SHADER_UNUSED_KHR;
+        groups[0].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+        // miss.
+        groups[1].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[1].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        groups[1].generalShader      = 1;
+        groups[1].closestHitShader   = VK_SHADER_UNUSED_KHR;
+        groups[1].anyHitShader       = VK_SHADER_UNUSED_KHR;
+        groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+        // sphere.
+        groups[2].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[2].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+        groups[2].generalShader      = VK_SHADER_UNUSED_KHR;
+        groups[2].closestHitShader   = 4;
+        groups[2].anyHitShader       = VK_SHADER_UNUSED_KHR;
+        groups[2].intersectionShader = 2;
+
+        // plane.
+        groups[3].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        groups[3].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+        groups[3].generalShader      = VK_SHADER_UNUSED_KHR;
+        groups[3].closestHitShader   = 4;
+        groups[3].anyHitShader       = VK_SHADER_UNUSED_KHR;
+        groups[3].intersectionShader = 3;
+
+        ci.groupCount = shaderGroupCount;
+        ci.pGroups    = groups;
+
+        ci.maxPipelineRayRecursionDepth = 1;  //TODO ????
+                                              //    const VkPipelineLibraryCreateInfoKHR*                pLibraryInfo;
+                                              //const VkRayTracingPipelineInterfaceCreateInfoKHR*    pLibraryInterface;
+                                              //  const VkPipelineDynamicStateCreateInfo*              pDynamicState;
+        ci.layout = gd->pipelineLayout;
+        //    VkPipeline                                           basePipelineHandle;
+        // int32_t                                              basePipelineIndex;
+
+        // TODO: for some reason this shit is failing ... that's really stupid!
+        // hey! so i removed some crap and I managed to get this to not fail and give back some infos.
+        VK_CHECK(vkCreateRayTracingPipelinesKHR(gd->vkDevice,
+            VK_NULL_HANDLE,  //VkDeferredOperationKHR                      deferredOperation,
+            VK_NULL_HANDLE,  //VkPipelineCache                             pipelineCache,
+            1,               //uint32_t                                    createInfoCount,
+            &ci,             //const VkRayTracingPipelineCreateInfoKHR*    pCreateInfos,
+            nullptr,         //alloc callback.
+            &gd->vkRayPipeline));
+    }
+
+    // get some infos about the device.
+    {
+        VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayProps = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+        VkPhysicalDeviceProperties2 props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        props.pNext                       = &rayProps;
+        vkGetPhysicalDeviceProperties2(gd->vkGpu, &props);
+
+        gd->vkShaderGroupHandleSize     = rayProps.shaderGroupHandleSize;
+        gd->vkShaderGroupTableAlignment = rayProps.shaderGroupBaseAlignment;
+    }
+
+    // setup the shader binding tables.
+    {
+        // allocate the buffer for the shader table.
+        size_t bufferSize =
+            gd->vkShaderGroupTableAlignment * 3 +
+            gd->vkShaderGroupTableAlignment * 4;  // TODO: this is a little big, but it should do the trick.
+
+        void *data;
+
+        ae::VK::createUploadBufferDumb(gd->vkDevice,
+            bufferSize,
+            gd->vkUploadHeapIdx,
+            VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,  //TODO: is there more stuff needed here?
+            &gd->vkShaderTable,
+            &gd->vkShaderTableBacking,
+            &data);
+
+        if (data) {
+            uint8_t *pData = (uint8_t *)data;
+
+            // raygen.
+            VK_CHECK(vkGetRayTracingShaderGroupHandlesKHR(gd->vkDevice,
+                gd->vkRayPipeline,
+                0,  //uint32_t                                    firstGroup,
+                1,  //group count
+                gd->vkShaderGroupHandleSize,
+                pData));
+            pData += gd->vkShaderGroupTableAlignment;
+
+            // miss.
+            VK_CHECK(vkGetRayTracingShaderGroupHandlesKHR(gd->vkDevice,
+                gd->vkRayPipeline,
+                1,  //uint32_t                                    firstGroup,
+                1,  //group count
+                gd->vkShaderGroupHandleSize,
+                pData));
+            pData += gd->vkShaderGroupTableAlignment;
+
+            // hit group table.
+            VK_CHECK(vkGetRayTracingShaderGroupHandlesKHR(gd->vkDevice,
+                gd->vkRayPipeline,
+                2,  //uint32_t                                    firstGroup,
+                2,  //group count
+                gd->vkShaderGroupHandleSize * 2,
+                pData));
+
+            ae::VK::flushAndUnmapUploadBuffer(gd->vkDevice, bufferSize, gd->vkShaderTableBacking);
+        }
+
+    }  // END setup the shader bind tables.
 
     // start recording the cmd buffer to do the good copy work :D
     {
@@ -1305,32 +1976,25 @@ void InitVK(ae::game_memory_t *gameMemory)
         VkCommandBufferBeginInfo beginInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
-        auto emitSingleImageBarrier = [&](VkAccessFlags        src,
-                                          VkAccessFlags        dst,
-                                          VkImageLayout        srcLayout,
-                                          VkImageLayout        dstLayout,
-                                          VkImage              img,
-                                          VkPipelineStageFlags before,
-                                          VkPipelineStageFlags after) {
-            VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            barrier.srcAccessMask        = src;
-            barrier.dstAccessMask        = dst;
-            barrier.oldLayout            = srcLayout;
-            barrier.newLayout            = dstLayout;
-            barrier.image                = img;
-            vkCmdPipelineBarrier(cmd,
-                before,   //NOTE: no need to sync with anything before. we stall GPU between cmd buffers of this kind.
-                after,    // dst stage.
-                0,        //dependencyFlags,
-                0,        //                                   memoryBarrierCount,
-                nullptr,  //                      pMemoryBarriers,
-                0,        //                               bufferMemoryBarrierCount,
-                nullptr,  //                pBufferMemoryBarriers,
-                1,        //                                    imageMemoryBarrierCount,
-                &barrier);
-        };
-
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gd->vkComputePipeline);
+
+        // NOTE: there seems to be a lot of crap going on with these descriptor sets,
+        // so I'm just going to break down here.
+        //
+        // you have the pipeline layout which is the "signature" of the pipeline. it is what the pipeline expects.
+        // a single layout consists of a set of descriptor set layouts.
+        //
+        // this is to say that the pipeline is merely a set of descriptor sets.
+        //
+        // the layouts are just that, layouts.
+        // desc set layout is used to help us alloc the desc set.
+        //
+        // when we go to actually do stuff, we need to bind real descriptor sets into the pipeline.
+        // and so that's what the call is below.
+        //
+        // and when we do the bind, we're specifying the index into the global set (so elem is desc set).
+        //
+        // that's a whole lotta crap, man! surely this can be done better from an API standpoint :D
         vkCmdBindDescriptorSets(cmd,
             VK_PIPELINE_BIND_POINT_COMPUTE,
             gd->pipelineLayout,
@@ -1344,7 +2008,8 @@ void InitVK(ae::game_memory_t *gameMemory)
         // dispatch using the bound pipeline.
         vkCmdDispatch(cmd, ae::math::div_ceil(winInfo.width, 16), ae::math::div_ceil(winInfo.height, 16), 1);
 
-        emitSingleImageBarrier(VK_ACCESS_SHADER_WRITE_BIT,  // sync with prior shader writes.
+        emitSingleImageBarrier(cmd,
+            VK_ACCESS_SHADER_WRITE_BIT,  // sync with prior shader writes.
             VK_ACCESS_TRANSFER_READ_BIT,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1366,31 +2031,82 @@ void InitVK(ae::game_memory_t *gameMemory)
             {0, 0, 0},                                                      //offset
             {gameMemory->backbufferWidth, gameMemory->backbufferHeight, 1}  //extent.
         };
-        vkCmdCopyImageToBuffer(cmd, gd->vkCpuTex, VK_IMAGE_LAYOUT_GENERAL, gd->vkCpuTexBuffer, 1, &region);
+        vkCmdCopyImageToBuffer(cmd, gd->vkCpuTex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, gd->vkCpuTexBuffer, 1, &region);
 
         // NOTE: for this barrier we do not care about sync since we always wait for this command list.
-        emitSingleImageBarrier(VK_ACCESS_TRANSFER_READ_BIT,
+        emitSingleImageBarrier(cmd,
+            VK_ACCESS_TRANSFER_READ_BIT,
             VK_ACCESS_NONE,
             VK_IMAGE_LAYOUT_UNDEFINED,  //discard is OK.
             VK_IMAGE_LAYOUT_GENERAL,
             gd->vkCpuTex,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_NONE);
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         // TODO: do we need to transfer the buffer to be in the general layout for CPU reading??
 
         //        hr = (cmd->Close());
         VK_CHECK(vkEndCommandBuffer(cmd));
-    }
 
-    // create the fence so that we can do the waiting stuff.
-    {
-        VkFenceCreateInfo ci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        VK_CHECK(vkCreateFence(gd->vkDevice, &ci, nullptr, &gd->vkFence));
+    }  // end init the cmdBuf for doing the good copy work.
+
+}  // end InitVK
+
+void emitSingleImageBarrier(VkCommandBuffer cmd,
+    VkAccessFlags                           src,
+    VkAccessFlags                           dst,
+    VkImageLayout                           srcLayout,
+    VkImageLayout                           dstLayout,
+    VkImage                                 img,
+    VkPipelineStageFlags                    before,
+    VkPipelineStageFlags                    after)
+{
+    VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask        = src;
+    barrier.dstAccessMask        = dst;
+    barrier.oldLayout            = srcLayout;
+    barrier.newLayout            = dstLayout;
+    barrier.image                = img;
+    barrier.subresourceRange     = {
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        0,  // base mip level.
+        1,  //mip count.
+        0,  //array base.
+        1   //array layers
+    };
+
+    vkCmdPipelineBarrier(cmd,
+        before,   //NOTE: no need to sync with anything before. we stall GPU between cmd buffers of this kind.
+        after,    // dst stage.
+        0,        //dependencyFlags,
+        0,        //                                   memoryBarrierCount,
+        nullptr,  //                      pMemoryBarriers,
+        0,        //                               bufferMemoryBarrierCount,
+        nullptr,  //                pBufferMemoryBarriers,
+        1,        //                                    imageMemoryBarrierCount,
+        &barrier);
+};
+
+void WaitForAndResetFence(VkDevice device, VkFence *pFence, uint64_t waitTime)
+{
+    VkResult result = (vkWaitForFences(device,
+        1,
+        pFence,
+        // wait until all the fences are signaled. this blocks the CPU thread.
+        VK_TRUE,
+        waitTime));
+    // TODO: there was an interesting bug where if I went 1ms on the timeout, things were failing,
+    // where the fence was reset too soon. figure out what what going on in that case.
+
+    if (result == VK_SUCCESS) {
+        // reset fences back to unsignaled so that can use em' again;
+        vkResetFences(device, 1, pFence);
+    } else {
+        AELoggerError("some error occurred during the fence wait thing., %s", ae::VK::VkResultToString(result));
     }
+}
 
 #undef VK_CHECK
-}
 
 #endif  // AUTOMATA_ENGINE_VK_BACKEND
 
@@ -2076,33 +2792,7 @@ void InitD3D12(game_data *gd)
                 uBuffer.curr().initState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
 
                 if (data) {
-                    dxr_world w = {};
-
-                    // TODO: right now we only support planes pointing up.
-                    // and because that, I am being lazy here and only init one plane info
-                    // in DXR world.
-                    w.planes[0].d = 0;
-                    // plane is pointing straight up!
-                    w.planes[0].n[1]     = 1;  // this gives something that is NOT 0x1, since it is a float.
-                    w.planes[0].matIndex = 1;
-
-                    for (int i = 0; i < g_world.sphereCount; i++) {
-                        w.spheres[i].r        = g_world.spheres[i].r;
-                        w.spheres[i].matIndex = g_world.spheres[i].matIndex;
-                    }
-
-                    for (int i = 0; i < g_world.materialCount; i++) {
-                        auto &mat              = g_world.materials[i];
-                        w.materials[i].scatter = mat.scatter;
-                        memcpy(&w.materials[i].refColor, &mat.refColor, sizeof(float) * 3);
-                        memcpy(&w.materials[i].emitColor, &mat.emitColor, sizeof(float) * 3);
-                    }
-
-                    // generate the cone for shooting rays from a pixel.
-                    for (int i = 0; i < g_raysPerPixel; i++) {
-                        w.rands[i].xy[0] = RandomBilateral();
-                        w.rands[i].xy[1] = RandomBilateral();
-                    }
+                    dxr_world w = SCENE_TO_DXR_WORLD();
 
                     memset(data, 0, sceneBufferSize);
                     memcpy(data, &w, sizeof(w));
@@ -2247,3 +2937,36 @@ void InitD3D12(game_data *gd)
 }
 
 #endif // #if AUTOMATA_ENGINE_DX12_BACKEND
+
+dxr_world SCENE_TO_DXR_WORLD()
+{
+    dxr_world w = {};
+
+    // TODO: right now we only support planes pointing up.
+    // and because that, I am being lazy here and only init one plane info
+    // in DXR world.
+    w.planes[0].d = 0;
+    // plane is pointing straight up!
+    w.planes[0].n[1]     = 1;  // this gives something that is NOT 0x1, since it is a float.
+    w.planes[0].matIndex = 1;
+
+    for (int i = 0; i < g_world.sphereCount; i++) {
+        w.spheres[i].r        = g_world.spheres[i].r;
+        w.spheres[i].matIndex = g_world.spheres[i].matIndex;
+    }
+
+    for (int i = 0; i < g_world.materialCount; i++) {
+        auto &mat              = g_world.materials[i];
+        w.materials[i].scatter = mat.scatter;
+        memcpy(&w.materials[i].refColor, &mat.refColor, sizeof(float) * 3);
+        memcpy(&w.materials[i].emitColor, &mat.emitColor, sizeof(float) * 3);
+    }
+
+    // generate the cone for shooting rays from a pixel.
+    for (int i = 0; i < g_raysPerPixel; i++) {
+        w.rands[i].xy[0] = RandomBilateral();
+        w.rands[i].xy[1] = RandomBilateral();
+    }
+
+    return w;
+}

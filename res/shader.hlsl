@@ -1,7 +1,10 @@
 
+// NOTE: things go as vk::binding(binding, set)
+
+[[vk::binding(0, 0)]]
 RWTexture2D<float4> gpuTex : register(u0); // maps to 0th UAV register.
 
-[[vk::binding(1, 0)]] // NOTE: the binding goes as first number is the register, and the second number is the descriptor set.
+[[vk::binding(1, 0)]]
 RWTexture2D<float4> cpuTex : register(u1); // maps to 1st UAV register.
 
 // so, when we div_ceil on the numthreads number, does that produce
@@ -10,10 +13,10 @@ RWTexture2D<float4> cpuTex : register(u1); // maps to 1st UAV register.
 [numthreads(16, 16, 1)]
 void copy_shader(uint3 DTid : SV_DispatchThreadID)
 {	
-    //cpuTex[DTid.xy] = gpuTex.Load(DTid.xy);
+  cpuTex[DTid.xy] = gpuTex.Load(DTid.xy);
     // swizzle the colors because our output surface expects so.
-    //cpuTex[DTid.xy].rgba = cpuTex[DTid.xy].bgra;
-cpuTex[DTid.xy]=float4(1,0,0,1);
+  cpuTex[DTid.xy].rgba = cpuTex[DTid.xy].bgra;
+  //cpuTex[DTid.xy]=float4(1,0,0,1);
 }
 
 
@@ -63,6 +66,7 @@ struct random_pair_t
 
 
 // this is bound via a constant buffer view.
+[[vk::binding(2, 0)]]
 cbuffer WorldConstantBuffer : register(b0)
 {
   // TODO: we want to pull this constant 10 from somewhere common.
@@ -73,16 +77,25 @@ cbuffer WorldConstantBuffer : register(b0)
 };
 
 // these are bound via constant root params.
-cbuffer TexelConstantBuffer : register(b0, space1)
+
+struct TexelConstantBuffer
 {
     int texelX;
     int texelY;
-    int randSeed;
+    int randSeed; //TODO: unused.
     uint image_width;
     uint image_height;
 };
 
+#if VULKAN
+[[vk::push_constant]]
+TexelConstantBuffer cb;
+#else
+ConstantBuffer<TexelConstantBuffer> cb : register(b0, space1);
+#endif
+
 // raw buffer SRV.
+[[vk::binding(3, 0)]]
 RaytracingAccelerationStructure MyScene : register(t0);
 
 // NOTE: from https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
@@ -136,7 +149,7 @@ void ray_gen_shader()
 
   uint3 rayIndex=DispatchRaysIndex();
 
-  uint2 xy = rayIndex.xy + uint2(texelX,texelY);
+  uint2 xy = rayIndex.xy + uint2(cb.texelX, cb.texelY);
   float x = xy.x;
   float y = xy.y;
   
@@ -157,23 +170,23 @@ void ray_gen_shader()
 
 
 
-  float halfPixW = 1.0f / image_width;
-  float halfPixH = 1.0f / image_height;
+  float halfPixW = 1.0f / cb.image_width;
+  float halfPixH = 1.0f / cb.image_height;
 
   // compute the physical film dimensions.
   float filmH = 1;
   float filmW = 1;
-  if (image_width > image_height) {
-    filmH = filmW * (float)image_height / (float)image_width;
-  } else if (image_height > image_width) {
-    filmW = filmH * (float)image_width / (float)image_height;
+  if (cb.image_width > cb.image_height) {
+    filmH = filmW * (float)cb.image_height / (float)cb.image_width;
+  } else if (cb.image_height > cb.image_width) {
+    filmW = filmH * (float)cb.image_width / (float)cb.image_height;
   }
   float halfFilmW = filmW / 2.0f;
   float halfFilmH = filmH / 2.0f;
 
   // compute physical location of pixel on the film, normalized to -1 -> 1.
-  float filmY = -1.0f + 2.0f * y / (float)image_height;
-  float filmX = -1.0f + 2.0f * x / (float)image_width;
+  float filmY = -1.0f + 2.0f * y / (float)cb.image_height;
+  float filmX = -1.0f + 2.0f * x / (float)cb.image_width;
 
 
   const float filmDist = 1;
@@ -187,9 +200,9 @@ void ray_gen_shader()
   // TODO: this random gen stuff is maybe not the right math, but we seem to be getting
   // unique numbers per call to random gen, and this holds true across all threads.
   // things visually look okay, so let's call this good enough for now.
-  uint      rand_period = (8 * 4) * image_width * image_height;
+  uint      rand_period = (8 * 4) * cb.image_width * cb.image_height;
   MyPayload fakePayload;
-  fakePayload.currRandOffset = rand_period * (xy.x + xy.y * image_width);
+  fakePayload.currRandOffset = rand_period * (xy.x + xy.y * cb.image_width);
 
   for (int i = 0; i < raysPerPixel; i++) {
 
@@ -341,6 +354,14 @@ void intersection_plane()
   
 }
 
+// TODO: this is a temporary shader because for some reason the below one is not working,
+// and we have zero feedback from VK validation / DXC as to why, just a crash in the driver. 
+[shader("closesthit")]
+void closest_hit_simple(inout MyPayload payload, in MyAttributes attr)
+{
+  material_t mat = world_materials[attr.hitMatIndex];
+  payload.color += float3(0,1,0);
+}
 
 [shader("closesthit")]
 void closesthit_main(inout MyPayload payload, in MyAttributes attr)
@@ -349,7 +370,7 @@ void closesthit_main(inout MyPayload payload, in MyAttributes attr)
   const uint constRayFlags =         RAY_FLAG_FORCE_OPAQUE;
   uint3 rayIndex=DispatchRaysIndex();
 
-  uint2 xy = rayIndex.xy + uint2(texelX,texelY);
+  uint2 xy = rayIndex.xy + uint2(cb.texelX, cb.texelY);
   
   material_t mat = world_materials[attr.hitMatIndex];
 

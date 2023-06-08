@@ -130,31 +130,67 @@ struct game_data {
     uint32_t vkVramHeapIdx;
 
     // resources.
-    VkImage vkCpuTex;
-    VkImageView vkCpuTexView;
+    VkImage  vkGpuTex;
+    VkImage  vkCpuTex;
     VkBuffer vkCpuTexBuffer;
+    VkBuffer vkShaderTable;
+    VkBuffer vkWorldBuffer;
+    VkBuffer vkTlasBuffer;
+    VkBuffer vkBlasBuffer;  // TODO: want two of these.
+    VkBuffer vkScratch[3];
+    VkBuffer vkInstanceBuffer;
+    VkBuffer vkAabbBuffer;
+
+    // views.
+    VkImageView vkCpuTexView;
+    VkImageView vkGpuTexView;
 
     // memory backing the resources.
+    VkDeviceMemory vkGpuTexBacking;
     VkDeviceMemory vkCpuTexBacking;
     VkDeviceMemory vkCpuTexBufferBacking;
+    VkDeviceMemory vkShaderTableBacking;
+    VkDeviceMemory vkWorldBufferBacking;
+    VkDeviceMemory vkTlasBufferBacking;
+    VkDeviceMemory vkBlasBufferBacking;
+    VkDeviceMemory vkScratchBacking[3];
+    VkDeviceMemory vkInstanceBufferBacking;
+    VkDeviceMemory vkAabbBufferBacking;
+
+    // metadata about resources.
     size_t vkCpuTexSize;
+    size_t vkGpuTexSize;
     size_t vkCpuTexBufferSize;
 
     // layout.
-    VkDescriptorSetLayout descSet; // TODO: maybe rename this one.
-      // the layout is used as part of the pipeline sig + a way to allocated sets from the pool.
-    VkPipelineLayout pipelineLayout;
-    VkDescriptorSet theDescSet;    // allocated from the pool.
-    VkDescriptorPool descPool;
+    VkDescriptorSetLayout descSet;  // TODO: maybe rename this one.
+    VkPipelineLayout      pipelineLayout;
+    VkDescriptorSet       theDescSet;  // allocated from the pool.
+    VkDescriptorPool      descPool;
 
     // for the compute copy work.
     VkCommandBuffer cmdBuf;
-    VkCommandPool commandPool;
-    VkPipeline vkComputePipeline;
+    VkCommandPool   commandPool;
+    VkPipeline      vkComputePipeline;
+    VkFence         vkFence;
+
+    // for the raytracing work.
+    VkCommandBuffer rayCmdBufs[THREAD_COUNT];
+    VkCommandPool   rayCommandPools[THREAD_COUNT];
+    VkFence         rayFences[THREAD_COUNT]; //TODO: maybe rename this, it is same as DXR one.
+
+    // also for the raytracing work.
+    VkPipeline                 vkRayPipeline;
+    VkAccelerationStructureKHR vkTlas;
+    VkAccelerationStructureKHR vkBlas;
+
+    // some constants that we got from the physical device.
+    // TODO: im pretty sure there are other limits that we can query that we are ignoring.
+    size_t vkShaderGroupHandleSize;
+    size_t vkShaderGroupTableAlignment;
 
     // for the queue.
-    int vkQueueIndex = -1;
+    int     vkQueueIndex = -1;
     VkQueue vkQueue;
-    VkFence vkFence;
 #endif
 };
