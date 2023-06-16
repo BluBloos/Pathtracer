@@ -138,18 +138,32 @@ RESOURCE USAGE AND SYNC ::
 the resources need the following usage bits,
 
 accel structures                : VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+
 scratch space                   : VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+
+
 inputs (such as verts e.g.)     : VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+
+
 shading binding table           : VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR
 
 
 accel build stage               : VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
 access as accel structure       : VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR
                                   \  VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR
+
 access to inputs for the build  : VK_ACCESS_SHADER_READ_BIT
+^ rps "raytracing"
+
+
 copy accel structure stage      : VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
+
+
 access buffer via device addr   : VK_ACCESS_TRANSFER_READ_BIT
                                   \  VK_ACCESS_TRANSFER_WRITE_BIT
+^ rps "uav_buf"
+
+
 trace ray cmd stage             : VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
 access shading binding talbe    : VK_ACCESS_SHADER_READ_BIT
 
