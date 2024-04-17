@@ -53,6 +53,12 @@ typedef struct sphere {
     unsigned int matIndex;
 } sphere_t;
 
+typedef struct mesh {
+    v3 *points;
+    unsigned int pointCount;
+    unsigned int matIndex;
+} mesh_t;
+
 typedef struct world {
     unsigned int materialCount;
     material *materials;
@@ -60,4 +66,6 @@ typedef struct world {
     plane *planes;
     unsigned int sphereCount;
     sphere *spheres;
+    unsigned int meshCount;
+    mesh *meshes;
 } world_t;

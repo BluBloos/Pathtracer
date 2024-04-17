@@ -128,7 +128,7 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
             plane_t plane = world->planes[planeIndex];  
             float denom = Dot(plane.n, rayDirection);
             if ((denom < -tolerance) || (denom > tolerance)) {
-                float t = (-plane.d - Dot(plane.n, rayOrigin)) / denom;
+                float t = (plane.d - Dot(plane.n, rayOrigin)) / denom;
                 if ((t > minHitDistance) && (t < hitDistance)) {
                     hitDistance = t;
                     hitMatIndex = plane.matIndex;
@@ -136,11 +136,38 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
                 }
             } 
         }
+        // Triangle intersection test
+        for (
+            unsigned int meshIndex = 0;
+            meshIndex < world->meshCount;
+            meshIndex++
+        ) {
+            mesh_t &mesh = world->meshes[meshIndex];
+            assert( mesh.pointCount % 3 == 0 );
+            for (
+                unsigned int triIndex = 0;
+                triIndex*3 < mesh.pointCount;
+                triIndex++
+            ) {
+                v3 *points = &mesh.points[triIndex*3];
+                v3 A=points[0];
+                v3 B=points[1];
+                v3 C=points[2];
+                v3 n = Normalize( Cross( B-A, C-A ) );
+                float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
+                // hit.
+                if ((t > minHitDistance) && (t < hitDistance)) {
+                    hitDistance = t;
+                    hitMatIndex = mesh.matIndex;
+                    nextNormal = n;
+                }
+            }
+        }
         if (hitMatIndex) {
             material_t mat = world->materials[hitMatIndex];
             //TODO(Noah): Do real reflectance stuff
             result = result + Hadamard(attenuation, mat.emitColor);
-            attenuation = Hadamard(attenuation, mat.refColor);            
+            attenuation = Hadamard(attenuation, mat.refColor);
             rayOrigin = rayOrigin + hitDistance * rayDirection;
             //NOTE(Noah): this does a reflection thing
             //TODO(Noah): these are not accurate permutations
@@ -166,9 +193,10 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
 
 static world_t world = {};
 // populate word with floor and spheres.
-static material_t materials[4] = {};
+static material_t materials[5] = {};
 static plane_t planes[1] = {};
 static sphere_t spheres[3] = {};
+static mesh_t meshes[1]={};
 static v3 cameraP = {};
 static v3 cameraZ = {};
 static v3 cameraX = {};
@@ -272,7 +300,9 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
     uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(image.width * image.height) / 
         (float)(PIXELS_PER_TEXEL * THREAD_COUNT));
+#if 0
     PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
+#endif
     {
         HANDLE threadHandles[THREAD_COUNT];
         uint32_t xPos = 0;
@@ -310,9 +340,11 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                     if (isPartialTexel) j--; // NOTE(Noah): This is hack ...
                     StretchyBufferPush(texels, texel);
                 } else {
+#if 0
                     PlatformLoggerWarn("found invalid texel:");
                     PlatformLoggerLog("with x: %d", texel.xPos);
                     PlatformLoggerLog("with y: %d", texel.yPos);
+#endif
                 }
             }
         }
@@ -354,6 +386,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     materials[2].refColor = V3(0.7f, 0.25f, 0.3f);
     materials[3].refColor = V3(0.0f, 0.8f, 0.0f);
     materials[3].scatter = 1.0f;
+    materials[4].refColor = V3(0.3f, 0.25f, 0.7f);
     planes[0].n = V3(0,0,1);
     planes[0].d = 0; // plane on origin
     planes[0].matIndex = 1;
@@ -362,16 +395,24 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     spheres[0].matIndex = 2;
     spheres[1].p = V3(-3,-2,0);
     spheres[1].r = 1.0f;
-    spheres[1].matIndex = 2;
+    spheres[1].matIndex = 4;
     spheres[2].p = V3(-2,0,2);
     spheres[2].r = 1.0f;
     spheres[2].matIndex = 3;
+    meshes[0].pointCount=3;
+    meshes[0].points=(v3*)malloc(sizeof(v3)*meshes[0].pointCount);
+    meshes[0].points[0] = { -3.0,-1.0,0.5 };
+    meshes[0].points[1] = { -4.0,-3.0,0.5 };
+    meshes[0].points[2] = { -2.0,-3.0,0.5 };    
+    meshes[0].matIndex = 3;
     world.materialCount = ARRAY_COUNT(materials);
     world.materials = materials;
     world.planeCount = ARRAY_COUNT(planes);
     world.planes = planes;
     world.sphereCount = ARRAY_COUNT(spheres);
     world.spheres = spheres;
+    world.meshCount = ARRAY_COUNT(meshes);
+    world.meshes  =meshes;
     // define camera and characteristics
     cameraP = V3(0, -10, 1); // go back 10 and up 1
     cameraZ = Normalize(cameraP);
@@ -387,6 +428,17 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     filmCenter = cameraP - filmDist * cameraZ;
     halfPixW = 1.0f / image.width;
     halfPixH = 1.0f / image.height;
+    // print infos.
+    {
+        PlatformLoggerLog("camera located at (%f,%f,%f)\n", cameraP.x,cameraP.y,cameraP.z);
+        PlatformLoggerLog("cameraX: (%f,%f,%f)\n", cameraX.x,cameraX.y,cameraX.z);
+        PlatformLoggerLog("cameraY: (%f,%f,%f)\n", cameraY.x,cameraY.y,cameraY.z);
+        PlatformLoggerLog("cameraZ: (%f,%f,%f)\n", cameraZ.x,cameraZ.y,cameraZ.z);
+        PlatformLoggerLog(
+            "cameraX and Y define the plane where the image plane is embedded.\n"
+            "rays are shot originating from the cameraP and through the image plane(i.e. each pixel).\n"
+            "the camera has a local coordinate system which is different from the world coordinate system.\n");
+    }
     automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
     CreateThread(
         nullptr,

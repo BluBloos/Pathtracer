@@ -1,6 +1,7 @@
 #include <math.h>
 #include <float.h>
 #define PI 3.14159265358979323846264338327f
+#define TOLERANCE 0.0001f
 
 struct v2 {
     union {
@@ -103,6 +104,35 @@ struct v4 {
     };
 };
 
+struct m2 {
+    // the column vectors.
+    v2 a,b;
+};
+
+v2 operator*(m2 m, v2 v)
+{
+    v2 result;
+    result.x = m.a.x * v.x + m.b.x * v.y;
+    result.y = m.a.y * v.x + m.b.y * v.y;  
+    return result;
+}
+
+int Inverse(m2 m, m2 *mOut)
+{
+    int result=0;
+
+    float det = m.a.x * m.b.y - m.b.x * m.a.y;
+    if (det < TOLERANCE && det > -TOLERANCE)
+        return -1;
+
+    mOut->a.x = m.b.y / det;
+    mOut->b.y = m.a.x / det;
+    mOut->b.x = -m.b.x / det;
+    mOut->a.y = -m.a.y / det;
+    
+    return result;
+}
+
 // TODO(Noah): replace with intrinsic, probably among other changes in this file!
 inline float SquareRoot(float a) {
     float result = (float)sqrt(a);
@@ -196,4 +226,45 @@ static float LinearToSRGB(float L) {
         S = 1.055f * powf(L, 1.0f/2.4f) - 0.055f;
     }
     return S;
+}
+
+static float RayIntersectTri(v3 rayOrigin, v3 rayDirection, float minHit, v3 &A, v3 &B, v3 &C, v3 &N) {
+    // Locate the plane that the points are on.
+    // Find the point of the ray on the plane.
+    // Compute the barycentric coordinates of the plane point.
+    // check that they all add to 1 and are all positive, if so, we're in the triangle.
+
+    float denom = Dot(N, rayDirection);
+    if ((denom < -TOLERANCE) || (denom > TOLERANCE)) {
+        float d = Dot(A, N);
+        float t = (d - Dot(N, rayOrigin)) / denom;
+
+        v3 x = rayOrigin + t*rayDirection;
+        v3 a = B-A;
+        v3 b = C-A;
+
+        m2 mat;
+        {
+        float e,f,g,h;
+        e = Dot(a,a);
+        f = g = Dot(b,a);
+        h = Dot(b,b);
+        mat.a = {e,f};
+        mat.b = {g,h};
+        }
+
+        m2 matInv;
+        if (0!=Inverse(mat,&matInv)) return minHit;
+
+        v2 alphaBetaVector, xHat;
+        xHat = { Dot(a,x-A), Dot(b,x-A) };
+        alphaBetaVector = matInv * xHat;
+
+        bool bInTri=alphaBetaVector.x>=0.f&&alphaBetaVector.y>=0.f&&(1.f-alphaBetaVector.x-alphaBetaVector.y)>=0.f;
+        if (bInTri) {
+            return t;
+        }       
+    }
+
+    return minHit;
 }
