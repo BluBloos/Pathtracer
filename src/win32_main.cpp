@@ -5,6 +5,14 @@
 #include <windows.h>
 #include <gist/github/nc_stretchy_buffers.h>
 
+#define CGLTF_IMPLEMENTATION
+#include "external/cgltf.h"
+
+#define NC_DS_IMPLEMENTATION
+#include "nc_ds.h"
+
+static HANDLE masterThreadHandle;
+
 /*
 Next steps for the software overall:
 
@@ -217,6 +225,16 @@ image_32_t image = {};
 void visualizer(game_memory_t *gameMemory) {
     memcpy((void *)gameMemory->backbufferPixels, image.pixelPointer,
         sizeof(uint32_t) * gameMemory->backbufferWidth * gameMemory->backbufferHeight);
+
+    DWORD result = WaitForSingleObject( masterThreadHandle, 0);
+    if (result == WAIT_OBJECT_0) {
+//        setGlobalRunning
+        automata_engine::setGlobalRunning(false);// platform::GLOBAL_RUNNING=false;
+    }
+    else {
+        // the thread handle is not signaled - the thread is still alive
+    }
+    
 }
 
 void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw, int nh) { }
@@ -399,12 +417,134 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     spheres[2].p = V3(-2,0,2);
     spheres[2].r = 1.0f;
     spheres[2].matIndex = 3;
+    /*
     meshes[0].pointCount=3;
     meshes[0].points=(v3*)malloc(sizeof(v3)*meshes[0].pointCount);
     meshes[0].points[0] = { -3.0,-1.0,0.5 };
     meshes[0].points[1] = { -4.0,-3.0,0.5 };
     meshes[0].points[2] = { -2.0,-3.0,0.5 };    
+    */
+    meshes[0].points=nullptr;
     meshes[0].matIndex = 3;
+    // load gltf scene.
+    do {
+        const char *gltfFilePath="res\\mario.glb";
+        cgltf_options opt={};
+        cgltf_data *data; // contains URIs for buffers and images.
+        cgltf_result result = cgltf_parse_file(&opt, gltfFilePath, &data);
+
+        if (result != cgltf_result_success)
+            break;
+        
+        do {
+            if (cgltf_validate(data) != cgltf_result_success)
+                break;
+
+            opt={};
+            result=cgltf_load_buffers(&opt, data, gltfFilePath);
+
+            if (result != cgltf_result_success)
+                break;
+
+            static stack_t<cgltf_node*> stack={};
+
+            for (int i=0;i<data->scenes_count;i++)
+            {
+                cgltf_scene &scene=data->scenes[i];
+                for (int j=0;j<scene.nodes_count;j++)
+                {
+                    cgltf_node *node=scene.nodes[j];
+                    nc_spush(stack,node);
+                }
+            }
+
+            // process the nodes.
+            while( nc_ssize(stack) )
+            {
+                cgltf_node *node=nc_spop(stack);
+
+                if (node->mesh)
+                {
+                    cgltf_mesh *mesh = node->mesh;
+                    for (int i=0;i<mesh->primitives_count;i++)
+                    {
+                        cgltf_primitive prim=mesh->primitives[i];
+                        if (prim.type==cgltf_primitive_type_triangles)
+                        {
+                            //cgltf_material mat = prim.material;
+                            cgltf_accessor *indices = prim.indices;
+
+                            cgltf_float *posData=nullptr;
+                            int *indexData;
+                            cgltf_size float_count;
+                            for (int j=0;j<prim.attributes_count;j++)
+                            {
+                                cgltf_attribute attr = prim.attributes[j];
+                                if (attr.type==cgltf_attribute_type_position)
+                                {
+                                    assert(posData==nullptr);
+
+                                    cgltf_size floats_per_element = cgltf_num_components(attr.data->type);
+                                	float_count = attr.data->count * floats_per_element;
+
+                                    posData=(cgltf_float*)malloc(sizeof(cgltf_float)*float_count);
+                                    cgltf_accessor_unpack_floats(attr.data, posData, float_count);
+                                }
+
+                            }
+                            
+                            if (indices) {
+
+                                cgltf_size ints_per_element = cgltf_num_components(indices->type);
+                                cgltf_size int_count = indices->count * ints_per_element;
+                                indexData = (int*)malloc(sizeof(int) * int_count);
+                                cgltf_accessor_unpack_indices(indices, indexData, sizeof(int), int_count);
+
+                                // process the position and indices data to generate the triangles.
+                                assert(int_count % 3 == 0);
+                                for (int j = 0;j < int_count;j += 3)
+                                {
+                                    int a, b, c;
+                                    a = indexData[j] * 3;
+                                    b = indexData[j + 1] * 3;
+                                    c = indexData[j + 2] * 3;
+
+                                    v3 v1 = { posData[a] ,posData[a+1],posData[a+2] };
+                                    v3 v2 = { posData[b],posData[b + 1],posData[b + 2] };
+                                    v3 v3 = { posData[c],posData[c + 1],posData[c + 2]};
+
+                                    nc_sbpush(meshes[0].points, v1);
+                                    nc_sbpush(meshes[0].points, v2);
+                                    nc_sbpush(meshes[0].points, v3);
+                                }
+
+                                free(indexData);
+                            }
+                            else {
+                                for (int j = 0;j < float_count;j += 3)
+                                {
+                                    v3 v = { posData[j],posData[j+1],posData[j+2] };
+                                    nc_sbpush(meshes[0].points, v);
+                                }
+                            }
+
+                            free(posData);
+                        }
+                    }
+                }
+
+                for (int i=0;i<node->children_count;i++)
+                {
+                    cgltf_node *child=node->children[i];
+                    nc_spush(stack,child);
+                }
+            }
+
+        } while(0);
+
+        cgltf_free(data);
+    } while(0);
+    meshes[0].pointCount = nc_sbcount(meshes[0].points);
     world.materialCount = ARRAY_COUNT(materials);
     world.materials = materials;
     world.planeCount = ARRAY_COUNT(planes);
@@ -440,7 +580,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
             "the camera has a local coordinate system which is different from the world coordinate system.\n");
     }
     automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
-    CreateThread(
+    masterThreadHandle=CreateThread(
         nullptr,
         0, // default stack size.
         master_thread,
@@ -449,4 +589,6 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         nullptr
     );    
 }
+
+
 
