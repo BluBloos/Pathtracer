@@ -171,6 +171,31 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
                 }
             }
         }
+        // AABB intersection test
+        for (
+            unsigned int aabbIndex = 0;
+            aabbIndex < world->aabbCount;
+            aabbIndex++
+        ) {
+            aabb_t box = world->aabbs[aabbIndex];
+
+            bool exitedEarly;
+            int faceHitIdx;
+            // NOTE: the faceNormals array was copied directly from within doesRayIntersectWithAABB2.
+            // this is some garbage and not clean code. 
+            constexpr v3 faceNormals[] = {
+                // front, back, left, right, top, bottom.
+                {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
+            };
+            float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
+
+            // check hit.
+            if ((t > minHitDistance) && (t < hitDistance)) {
+                hitDistance = t;
+                hitMatIndex = box.matIndex;
+                nextNormal = faceNormals[faceHitIdx];
+            }
+        }
         if (hitMatIndex) {
             material_t mat = world->materials[hitMatIndex];
             //TODO(Noah): Do real reflectance stuff
@@ -205,6 +230,7 @@ static material_t materials[5] = {};
 static plane_t planes[1] = {};
 static sphere_t spheres[3] = {};
 static mesh_t meshes[1]={};
+static aabb_t aabbs[1]={};
 static v3 cameraP = {};
 static v3 cameraZ = {};
 static v3 cameraX = {};
@@ -417,6 +443,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     spheres[2].p = V3(-2,0,2);
     spheres[2].r = 1.0f;
     spheres[2].matIndex = 3;
+    aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
+    aabbs[0].matIndex = 4;
     /*
     meshes[0].pointCount=3;
     meshes[0].points=(v3*)malloc(sizeof(v3)*meshes[0].pointCount);
@@ -551,6 +579,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     world.planes = planes;
     world.sphereCount = ARRAY_COUNT(spheres);
     world.spheres = spheres;
+    world.aabbCount = ARRAY_COUNT(aabbs);
+    world.aabbs = aabbs;
     world.meshCount = ARRAY_COUNT(meshes);
     world.meshes  =meshes;
     // define camera and characteristics

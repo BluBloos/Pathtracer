@@ -1,5 +1,6 @@
 #include <math.h>
 #include <float.h>
+#include <assert.h>
 #define PI 3.14159265358979323846264338327f
 #define TOLERANCE 0.0001f
 
@@ -108,6 +109,24 @@ struct m2 {
     // the column vectors.
     v2 a,b;
 };
+
+/// @brief A struct to define an AABB (axis aligned bounding box).
+/// The extent of the box is defined by the origin and halfDim, i.e.
+/// xMin=origin.x-halfDim.x, xMax=origin.x+halfDim.x, etc.
+///
+/// @param origin  is the center of the box.
+/// @param halfDim is the half of the dimensions of the box.
+/// @param min     is the bottom left corner of the box.
+/// @param max     is the top right corner of the box.
+typedef struct aabb {
+    v3 origin;
+    v3 halfDim;
+    v3 min;
+    v3 max;
+    unsigned int matIndex;
+    //static aabb_t fromCube(v3 bottomLeft, float width);
+    //static aabb_t fromLine(v3 p0, v3 p1);
+} aabb_t;
 
 v2 operator*(m2 m, v2 v)
 {
@@ -267,4 +286,115 @@ static float RayIntersectTri(v3 rayOrigin, v3 rayDirection, float minHit, v3 &A,
     }
 
     return minHit;
+}
+
+
+// NOTE: This was stolen from the Atomation source code.
+//
+/* How it works:
+
+ find all planes that are "facing us". should at most be three.
+ intersect ray with these.
+ check if point is in bounds.
+
+ if the ray somehow intersects two planes (hits precisely vertex of AABB),
+ then deterministically give back some Idx to ensure no visual jitter frame-frame
+ if a consumer were to use faceHitIdx to render something. this is to say given a constant
+ ray, the result of this function should be temporally stable.
+
+ return minHitDistance if there was no hit, otherwise it returns the hit distance.
+*/
+float doesRayIntersectWithAABB2(
+    const v3 &rayOrigin, const v3 &rayDir, float minHitDistance,
+    const aabb_t &candidateBox, bool *exitedEarly, int*faceHitIdx
+) {
+    assert(rayDir.x != 0.f || rayDir.y != 0.f || rayDir.z != 0.f);
+
+    int potentialFaces[3]={};  //stores face Idx's.
+    int faceCount=0;
+
+    // find faces.
+    constexpr int aabbFaceCount=6;
+    constexpr v3 faceNormals[] = {
+        // front, back, left, right, top, bottom.
+        {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
+    };
+    assert(sizeof(faceNormals)/sizeof(v3)==aabbFaceCount);
+    for (int i=0;i<aabbFaceCount;i++){
+        float d = Dot(rayDir, faceNormals[i]);
+        if (d<0) {
+            potentialFaces[faceCount++]=i;
+        }
+    }
+    assert(faceCount<=3);
+    assert(aabbFaceCount==6);
+
+    for (int i=0;i<faceCount;i++) {
+        float planeCord;
+        auto checkPointInBounds = [&](const v3 &p) {
+            return p.x >= candidateBox.min.x && p.x <= candidateBox.max.x &&
+                    p.y >= candidateBox.min.y && p.y <= candidateBox.max.y &&
+                    p.z >= candidateBox.min.z && p.z <= candidateBox.max.z;
+        };
+        const int j=potentialFaces[i];
+        switch(j) {
+            case 0: // front, back: (which Z).
+            case 1:
+            {
+                planeCord = (j==0)?candidateBox.min.z:candidateBox.max.z;
+                if (rayDir.z==0.f) continue;
+                float tHit = (planeCord - rayOrigin.z) / rayDir.z;
+                if (tHit<0.f) continue;
+                float y=rayOrigin.y + rayDir.y * tHit;
+                float x=rayOrigin.x + rayDir.x * tHit;
+                if (checkPointInBounds(v3{x,y,planeCord})) {
+                    if (faceHitIdx) *faceHitIdx=potentialFaces[i];
+                    return tHit;
+                }
+            }
+            break;
+            case 2: // left, right: (which X).
+            case 3:
+            {
+                planeCord = (j==2)?candidateBox.min.x:candidateBox.max.x;
+                if (rayDir.x==0.f) continue;
+                float tHit = (planeCord - rayOrigin.x) / rayDir.x;
+                if (tHit<0.f) continue;
+                float y=rayOrigin.y + rayDir.y * tHit;
+                float z=rayOrigin.z + rayDir.z * tHit;
+                if (checkPointInBounds(v3{planeCord,y,z})) {
+                    if (faceHitIdx) *faceHitIdx=potentialFaces[i];
+                    return tHit;
+                }
+            }
+            break;
+            case 4: // top, bottom: (which Y).
+            case 5:
+            {
+                planeCord = (j==4)?candidateBox.max.y:candidateBox.min.y;
+                if (rayDir.y==0.f) continue;
+                float tHit = (planeCord - rayOrigin.y) / rayDir.y;
+                if (tHit<0.f) continue;
+                float x=rayOrigin.x + rayDir.x * tHit;
+                float z=rayOrigin.z + rayDir.z * tHit;
+                if (checkPointInBounds(v3{x,planeCord,z})) {
+                    if (faceHitIdx) *faceHitIdx=potentialFaces[i];
+                    return tHit;
+                }
+            }
+            break;
+        }
+    }
+
+    return minHitDistance;
+}
+
+static aabb_t MakeAABB(v3 origin, v3 halfDim)
+{
+    aabb_t r = {};
+    r.origin = origin;
+    r.halfDim = halfDim;
+    r.min = origin - halfDim;
+    r.max = origin + halfDim;
+    return r;
 }

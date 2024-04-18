@@ -66,6 +66,8 @@ typedef struct world {
     plane *planes;
     unsigned int sphereCount;
     sphere *spheres;
+    unsigned int aabbCount;
+    aabb *aabbs;
     unsigned int meshCount;
     mesh *meshes;
 } world_t;
