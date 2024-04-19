@@ -2,7 +2,7 @@
 #include <float.h>
 #include <assert.h>
 #define PI 3.14159265358979323846264338327f
-#define TOLERANCE 0.0001f
+#define TOLERANCE float(1e-9)
 
 struct v2 {
     union {
@@ -310,7 +310,7 @@ float doesRayIntersectWithAABB2(
 ) {
     assert(rayDir.x != 0.f || rayDir.y != 0.f || rayDir.z != 0.f);
 
-    int potentialFaces[3]={};  //stores face Idx's.
+    int potentialFaces[6]={};  //stores face Idx's.
     int faceCount=0;
 
     // find faces.
@@ -322,11 +322,12 @@ float doesRayIntersectWithAABB2(
     assert(sizeof(faceNormals)/sizeof(v3)==aabbFaceCount);
     for (int i=0;i<aabbFaceCount;i++){
         float d = Dot(rayDir, faceNormals[i]);
-        if (d<0) {
+       // if (d<0) 
+        {
             potentialFaces[faceCount++]=i;
         }
     }
-    assert(faceCount<=3);
+    //assert(faceCount<=3);
     assert(aabbFaceCount==6);
 
     for (int i=0;i<faceCount;i++) {
@@ -397,4 +398,11 @@ static aabb_t MakeAABB(v3 origin, v3 halfDim)
     r.min = origin - halfDim;
     r.max = origin + halfDim;
     return r;
+}
+
+static aabb_t AABBFromCube(v3 bottomLeft, float width)
+{
+    const v3 halfDim = { width / 2.0f, width / 2.0f, width / 2.0f };
+    const v3 origin = bottomLeft + halfDim;
+    return MakeAABB(origin, halfDim);
 }

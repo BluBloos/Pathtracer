@@ -34,8 +34,40 @@ typedef struct image_32 {
 } image_32_t;
 
 typedef struct material {
-    float scatter; // 0 is pure diffuse, 1 is pure spec
-    v3 refColor; /* reflection color */
+
+    // metals (conductors) have special properties w.r.t. light.
+    // when the EM wave arrives at a conductor interface, the wave goes to zero quite quickly at a characteristic
+    // length-scale called the skin-depth.
+    // (effectively, is completely absorbed and there is no scattering).
+    
+    // Depending on the interface, we can determine how much was refracted and how much was reflected.
+    // i.e. 
+    /*
+    float kS = calculateSpecularComponent(...); // reflection/specular fraction
+    float kD = 1.0 - kS;                        // refraction/diffuse  fraction
+    */
+    //
+    // it's also true that depending on the incoming angle, the amount reflect/refract will change. 
+    // this arises from the Fresnel equation.
+
+    // depending on the "microfacets" (the geometry at small physical scale), there might be multiple specular bounces
+    // of the light before it "exists" the surface. this leads to attenuation and therefore an affect called
+    // "self-shadowing".
+
+    // spectral rendering is where we consider more than just three wavelengths of light.
+    // there are physical effects that can vary quite intensely for different wavelengths.
+
+    // 0 is pure diffuse, 1 is pure specular.
+    // "diffuse" is referring to the physical phenomenon where the light refracts into the surface briefly before
+    // emerging out of the surface in the reflection direction. it's an approximation to ignore the emergent offset
+    // between the enter and exit locations. Subsurface scattering is a technique that takes this offset into account.
+    //
+    // "specular" is therefore referring to the light that hit the surface and was reflected, never refracting into it.
+    float scatter; 
+
+    /* reflection color = multiplies with the incoming color. */
+    v3 refColor; 
+    
     v3 emitColor;
 } material_t;
 
@@ -59,6 +91,14 @@ typedef struct mesh {
     unsigned int matIndex;
 } mesh_t;
 
+struct rtas_node_t
+{
+    int *triangles;
+    int triangleCount;
+    rtas_node_t *children;
+    aabb_t bounds;
+};
+
 typedef struct world {
     unsigned int materialCount;
     material *materials;
@@ -70,4 +110,5 @@ typedef struct world {
     aabb *aabbs;
     unsigned int meshCount;
     mesh *meshes;
+    rtas_node_t rtas;
 } world_t;

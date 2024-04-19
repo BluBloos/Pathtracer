@@ -11,6 +11,13 @@
 #define NC_DS_IMPLEMENTATION
 #include "nc_ds.h"
 
+#define MAX_BOUNCE_COUNT 8
+#define THREAD_COUNT 16
+#define THREAD_GROUP_SIZE 32
+#define RAYS_PER_PIXEL 4
+#define MIN_HIT_DISTANCE float(1e-5)
+#define WORLD_SIZE 20.f
+
 static HANDLE masterThreadHandle;
 
 /*
@@ -89,12 +96,21 @@ static void WriteImage(image_32_t image, char *fileName) {
     }
 }
 
+// helper function to make it a single line.
+bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, aabb_t box)
+{
+    bool exitedEarly;
+    int faceHitIdx;
+    float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
+    return t!=minHitDistance;
+}
+
 static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
     v3 result = {};
-    float tolerance = 0.0001f;
-    float minHitDistance = 0.001f;
+    float tolerance = TOLERANCE;
+    float minHitDistance =MIN_HIT_DISTANCE;
     v3 attenuation = V3(1, 1, 1);
-    for (unsigned int bounceCount = 0; bounceCount < 8; ++bounceCount) {
+    for (unsigned int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT; ++bounceCount) {
         float hitDistance = FLT_MAX;
         unsigned int hitMatIndex = 0;
         v3 nextNormal = {};
@@ -144,31 +160,43 @@ static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
                 }
             } 
         }
-        // Triangle intersection test
-        for (
-            unsigned int meshIndex = 0;
-            meshIndex < world->meshCount;
-            meshIndex++
-        ) {
-            mesh_t &mesh = world->meshes[meshIndex];
-            assert( mesh.pointCount % 3 == 0 );
-            for (
-                unsigned int triIndex = 0;
-                triIndex*3 < mesh.pointCount;
-                triIndex++
-            ) {
-                v3 *points = &mesh.points[triIndex*3];
-                v3 A=points[0];
-                v3 B=points[1];
-                v3 C=points[2];
-                v3 n = Normalize( Cross( B-A, C-A ) );
-                float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
-                // hit.
-                if ((t > minHitDistance) && (t < hitDistance)) {
-                    hitDistance = t;
-                    hitMatIndex = mesh.matIndex;
-                    nextNormal = n;
-                }
+        // intersection test with the triangles in the world (via an acceleration structure).
+        {
+            rtas_node_t &rtas = world->rtas;
+
+            static thread_local  stack_t<rtas_node_t*> nodes={};
+            if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, rtas.bounds))
+                nc_spush(nodes, &rtas);
+
+            mesh_t &mesh = world->meshes[0];
+
+            while(nc_ssize(nodes))
+            {
+                rtas_node_t *r = nc_spop(nodes);
+                if (r->children)
+                    for (int i=0;i<nc_sbcount(r->children);i++)
+                    {
+                        rtas_node_t *c = &r->children[i];
+                        if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, c->bounds))
+                            nc_spush(nodes, c);
+                    }
+                else // leaf
+                    for (int i=0;i<r->triangleCount;i++)
+                    {
+                        int triIndex = r->triangles[i];
+                        v3 *points = &mesh.points[triIndex*3];
+                        v3 A=points[0];
+                        v3 B=points[1];
+                        v3 C=points[2];
+                        v3 n = Normalize( Cross( B-A, C-A ) );
+                        float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
+                        // hit.
+                        if ((t > minHitDistance) && (t < hitDistance)) {
+                            hitDistance = t;
+                            hitMatIndex = mesh.matIndex;
+                            nextNormal = n;
+                        }
+                    }
             }
         }
         // AABB intersection test
@@ -243,7 +271,7 @@ static float halfFilmH;
 static v3 filmCenter;
 float halfPixW;
 float halfPixH;
-unsigned int raysPerPixel = 256;
+unsigned int raysPerPixel = RAYS_PER_PIXEL;
 image_32_t image = {};
 
 // TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
@@ -339,8 +367,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
 // some more throughput there ...
 
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
-#define THREAD_COUNT 7
-#define THREAD_GROUP_SIZE 32
+
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
     uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(image.width * image.height) / 
         (float)(PIXELS_PER_TEXEL * THREAD_COUNT));
@@ -421,6 +448,9 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
     ExitThread(0);
 }
 
+rtas_node_t GenerateAccelerationStructure(world_t *world);
+void LoadGltf();
+
 void automata_engine::Init(game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
@@ -445,17 +475,221 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     spheres[2].matIndex = 3;
     aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
     aabbs[0].matIndex = 4;
-    /*
-    meshes[0].pointCount=3;
-    meshes[0].points=(v3*)malloc(sizeof(v3)*meshes[0].pointCount);
-    meshes[0].points[0] = { -3.0,-1.0,0.5 };
-    meshes[0].points[1] = { -4.0,-3.0,0.5 };
-    meshes[0].points[2] = { -2.0,-3.0,0.5 };    
-    */
     meshes[0].points=nullptr;
-    meshes[0].matIndex = 3;
+    meshes[0].matIndex = 4;
     // load gltf scene.
-    do {
+    LoadGltf();
+    meshes[0].pointCount = nc_sbcount(meshes[0].points);
+    world.materialCount = ARRAY_COUNT(materials);
+    world.materials = materials;
+    world.planeCount = ARRAY_COUNT(planes);
+    world.planes = planes;
+    //world.sphereCount = ARRAY_COUNT(spheres);
+    world.spheres = spheres;
+    //world.aabbCount = ARRAY_COUNT(aabbs);
+    world.aabbs = aabbs;
+    world.meshCount = ARRAY_COUNT(meshes);
+    world.meshes = meshes;
+    world.rtas = GenerateAccelerationStructure(&world);
+    // define camera and characteristics
+    cameraP = V3(0, -10, 1); // go back 10 and up 1
+    cameraZ = Normalize(cameraP);
+    cameraX = Normalize(Cross(V3(0,0,1), cameraZ));
+    cameraY = Normalize(Cross(cameraZ, cameraX));
+    if (image.width > image.height) {
+        filmH = filmW * (float)image.height / (float)image.width;
+    } else if (image.height > image.width) {
+        filmW = filmH * (float)image.width / (float)image.height;
+    }
+    halfFilmW = filmW / 2.0f;
+    halfFilmH = filmH / 2.0f;
+    filmCenter = cameraP - filmDist * cameraZ;
+    halfPixW = 1.0f / image.width;
+    halfPixH = 1.0f / image.height;
+    // print infos.
+    {
+        PlatformLoggerLog("camera located at (%f,%f,%f)\n", cameraP.x,cameraP.y,cameraP.z);
+        PlatformLoggerLog("cameraX: (%f,%f,%f)\n", cameraX.x,cameraX.y,cameraX.z);
+        PlatformLoggerLog("cameraY: (%f,%f,%f)\n", cameraY.x,cameraY.y,cameraY.z);
+        PlatformLoggerLog("cameraZ: (%f,%f,%f)\n", cameraZ.x,cameraZ.y,cameraZ.z);
+        PlatformLoggerLog(
+            "cameraX and Y define the plane where the image plane is embedded.\n"
+            "rays are shot originating from the cameraP and through the image plane(i.e. each pixel).\n"
+            "the camera has a local coordinate system which is different from the world coordinate system.\n");
+    }
+    automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
+    masterThreadHandle=CreateThread(
+        nullptr,
+        0, // default stack size.
+        master_thread,
+        nullptr,
+        0, // thread runs immediately after creation.
+        nullptr
+    );    
+}
+
+void AdoptChildren(rtas_node_t &node, rtas_node_t B);
+
+
+rtas_node_t GenerateAccelerationStructure(world_t *world)
+{
+    rtas_node_t accel;
+
+#define LEVELS 5
+
+    float sep = WORLD_SIZE / float(1<<LEVELS);
+    int leavesCount, nodesCount, halfLeavesCount;
+    leavesCount = ceil(WORLD_SIZE / sep);
+    assert(leavesCount%2==0);
+    halfLeavesCount = leavesCount >> 1;
+    nodesCount=leavesCount * leavesCount * leavesCount;
+
+    // scratch space.
+    static rtas_node_t *nodes=(rtas_node_t *)malloc(nodesCount*sizeof(rtas_node_t));
+
+    auto ma=[&](int z,int y,int x) -> rtas_node_t &  {
+        return nodes[z*leavesCount*leavesCount+y*leavesCount+x];
+    };
+
+    auto jackma=[=](int z,int y,int x) -> aabb_t {
+        aabb_t box = MakeAABB(
+            // NOTE: the beauty here is that since the clamping to integer boundary
+            // went in an uneven way above, that means that here adding 0.5f indeed
+            // gets us to center, regardless of if we are talking about an AABB on
+            // either side.
+            v3 {
+                ( x-halfLeavesCount + .5f )*sep,
+                ( y-halfLeavesCount + .5f )*sep,
+                ( z-halfLeavesCount + .5f )*sep
+            }, //origin.
+            v3 {sep/2.f,sep/2.f,sep/2.f}    //halfdim.
+        );
+        return box;
+    };
+
+    // Triangle intersection test
+    for (
+        unsigned int meshIndex = 0;
+        meshIndex < world->meshCount;
+        meshIndex++
+    ) {
+        mesh_t &mesh = world->meshes[meshIndex];
+        assert( mesh.pointCount % 3 == 0 );
+        for (
+            int triIndex = 0;
+            triIndex*3 < mesh.pointCount;
+            triIndex++
+        ) {
+            v3 *points = &mesh.points[triIndex*3];
+
+            for(int i=0;i<3;i++)
+            {
+                v3 A=points[i];
+                // locate leaf.
+
+                int x,y,z,index;
+                //NOTE: we add halfleaf count since the positions may have been negative.
+    #if 0
+                x= int( A.x>0.f ? floor(A.x/sep) : ceil(A.x/sep) )+halfLeavesCount;
+                y= int( A.y>0.f ? floor(A.y/sep) : ceil(A.y/sep) )+halfLeavesCount;
+                z= int( A.z>0.f ? floor(A.z/sep) : ceil(A.z/sep) )+halfLeavesCount;
+    #else
+                // we have to take the floor always there will be a "singularity" at zero,
+                // where we lose the information about what grid space we were in. 
+                // plus, this means the largest negative number will be -halfLeavesCount.
+                // -halfLeavesCount+halfLeavesCount will map to zero!
+                x= int( floor(A.x/sep) )+halfLeavesCount;
+                y= int( floor(A.y/sep) )+halfLeavesCount;
+                z= int( floor(A.z/sep) )+halfLeavesCount;
+    #endif
+
+                assert(x>=0);
+                assert(y>=0);
+                assert(z>=0);
+
+                index=z*leavesCount*leavesCount + y * leavesCount + x;
+                
+                assert(index>=0&&index<nodesCount && 
+                    "triangle is out of the world bounds!\n"
+                    "either extend the world bounds or move the triangle.");
+                
+                nc_sbpush( ma(z,y,x).triangles,triIndex );
+                ma(z,y,x).triangleCount++;
+            }            
+        }
+    }
+
+    for (int z = 0; z < (leavesCount); z++)
+    for (int y = 0; y < (leavesCount); y++)
+    for (int x = 0; x < (leavesCount); x++)
+    {
+        aabb_t box = jackma(z,y,x);
+        ma(z,y,x).bounds=box;
+    }
+
+    // build up the tree.
+    for (int i=0;i< LEVELS; i++)
+    {
+        // each time we go through, we shall reduce the total space.
+        // this will simplify things and keep the cache locality better.
+        for (int z = 0; z < (leavesCount >> i); z += 2)
+        for (int y = 0; y < (leavesCount >> i); y += 2)
+        for (int x = 0; x < (leavesCount >> i); x += 2)
+        {
+            rtas_node_t r={};
+
+            // consider the 8 children.
+            auto x0y0z0 = ma(z,y,x);
+            auto x1y0z0 = ma(z,y, x + 1);
+            auto x0y1z0 = ma(z, y + 1,x);
+            auto x1y1z0 = ma(z, y + 1, x + 1);
+            auto x0y0z1 = ma(z+1,y,x);
+            auto x1y0z1 = ma(z+1, y, x + 1);
+            auto x0y1z1 = ma(z+1, y + 1,x);
+            auto x1y1z1 = ma(z+1, y + 1,x+1);
+
+            int triangleCount = 
+                x0y0z0.triangleCount+
+                x1y0z0.triangleCount+
+                x0y1z0.triangleCount+
+                x1y1z0.triangleCount+
+                x0y0z1.triangleCount+
+                x1y0z1.triangleCount+
+                x0y1z1.triangleCount+
+                x1y1z1.triangleCount;
+
+            if (triangleCount) {
+                AdoptChildren(r,x0y0z0);
+                AdoptChildren(r,x1y0z0);
+                AdoptChildren(r,x0y1z0);
+                AdoptChildren(r,x1y1z0);
+                AdoptChildren(r,x0y0z1);
+                AdoptChildren(r,x1y0z1);
+                AdoptChildren(r,x0y1z1);
+                AdoptChildren(r,x1y1z1);
+                r.triangleCount = triangleCount;
+            }
+
+            r.bounds = AABBFromCube(x0y0z0.bounds.min, sep * float(1<<(i + 1)) );
+            ma(x >> 1, y >> 1, z >> 1) = r;
+        }
+    }
+
+    accel = ma(0, 0, 0);
+
+    free(nodes);
+
+    return accel;
+}
+
+void AdoptChildren(rtas_node_t &node, rtas_node_t B)
+{
+    nc_sbpush(node.children,B);
+}
+
+void LoadGltf()
+{
+        do {
         const char *gltfFilePath="res\\mario.glb";
         cgltf_options opt={};
         cgltf_data *data; // contains URIs for buffers and images.
@@ -572,53 +806,4 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
         cgltf_free(data);
     } while(0);
-    meshes[0].pointCount = nc_sbcount(meshes[0].points);
-    world.materialCount = ARRAY_COUNT(materials);
-    world.materials = materials;
-    world.planeCount = ARRAY_COUNT(planes);
-    world.planes = planes;
-    world.sphereCount = ARRAY_COUNT(spheres);
-    world.spheres = spheres;
-    world.aabbCount = ARRAY_COUNT(aabbs);
-    world.aabbs = aabbs;
-    world.meshCount = ARRAY_COUNT(meshes);
-    world.meshes  =meshes;
-    // define camera and characteristics
-    cameraP = V3(0, -10, 1); // go back 10 and up 1
-    cameraZ = Normalize(cameraP);
-    cameraX = Normalize(Cross(V3(0,0,1), cameraZ));
-    cameraY = Normalize(Cross(cameraZ, cameraX));
-    if (image.width > image.height) {
-        filmH = filmW * (float)image.height / (float)image.width;
-    } else if (image.height > image.width) {
-        filmW = filmH * (float)image.width / (float)image.height;
-    }
-    halfFilmW = filmW / 2.0f;
-    halfFilmH = filmH / 2.0f;
-    filmCenter = cameraP - filmDist * cameraZ;
-    halfPixW = 1.0f / image.width;
-    halfPixH = 1.0f / image.height;
-    // print infos.
-    {
-        PlatformLoggerLog("camera located at (%f,%f,%f)\n", cameraP.x,cameraP.y,cameraP.z);
-        PlatformLoggerLog("cameraX: (%f,%f,%f)\n", cameraX.x,cameraX.y,cameraX.z);
-        PlatformLoggerLog("cameraY: (%f,%f,%f)\n", cameraY.x,cameraY.y,cameraY.z);
-        PlatformLoggerLog("cameraZ: (%f,%f,%f)\n", cameraZ.x,cameraZ.y,cameraZ.z);
-        PlatformLoggerLog(
-            "cameraX and Y define the plane where the image plane is embedded.\n"
-            "rays are shot originating from the cameraP and through the image plane(i.e. each pixel).\n"
-            "the camera has a local coordinate system which is different from the world coordinate system.\n");
-    }
-    automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
-    masterThreadHandle=CreateThread(
-        nullptr,
-        0, // default stack size.
-        master_thread,
-        nullptr,
-        0, // thread runs immediately after creation.
-        nullptr
-    );    
 }
-
-
-
