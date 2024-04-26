@@ -54,12 +54,11 @@ struct v3 {
     };
 };
 
-inline v3 operator+=(v3 a, v3 b) {
-    v3 result;
-    result.x = a.x + b.x;
-    result.y = a.y + b.y;
-    result.z = a.z + b.z;
-    return result;
+inline v3 &operator+=(v3 &a, v3 b) {
+    a.x = a.x + b.x;
+    a.y = a.y + b.y;
+    a.z = a.z + b.z;
+    return a;
 }
 
 inline v3 operator*(float a, v3 b) {
