@@ -67,8 +67,8 @@ typedef struct material {
     // we use the "roughness" term to model how rough the microfacet surface is.
     float roughness;
 
-    /* reflection color = multiplies with the incoming color. */
-    v3 refColor; 
+    int albedoIdx;
+    v3 albedo; // if there is no albedo texture.
     
     v3 emitColor;
 } material_t;

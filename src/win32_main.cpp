@@ -114,7 +114,7 @@ bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, 
     return t!=minHitDistance;
 }
 
-v3 brdf(material_t mat);
+v3 brdf(material_t &mat);
 
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
     
@@ -314,7 +314,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                 // so you get that product term of Ks (phong) or opacity(volume rendering).
                 //
                 // radiance = radiance + Hadamard(attenuation, mat.emitColor);
-                // attenuation = Hadamard(attenuation, mat.refColor);
+                // attenuation = Hadamard(attenuation, mat.albedo);
                 
                 rayOrigin = rayOrigin + hitDistance * rayDirection;
                 v3 pureBounce = rayDirection - 2.0f * Dot(nextNormal, rayDirection) * nextNormal;
@@ -616,14 +616,14 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     image = AllocateImage(winInfo.width, winInfo.height);    
     materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
-    materials[1].refColor = V3(0.5f, 0.5f, 0.5f);
+    materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
     materials[1].roughness = 1.f;
     //materials[1].emitColor = V3(0.3f, 0.0f, 0.0f);
-    materials[2].refColor = V3(0.7f, 0.25f, 0.3f);
+    materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
     materials[2].roughness = 1.f;
-    materials[3].refColor = V3(0.0f, 0.8f, 0.0f);
+    materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
     materials[3].roughness = 0.0f;
-    materials[4].refColor = V3(0.3f, 0.25f, 0.7f);
+    materials[4].albedo = V3(0.3f, 0.25f, 0.7f);
     materials[4].roughness = 1.f;
     { // generate debug materials for occtree voxels.
         int s=1<<LEVELS;
@@ -631,7 +631,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         for (int j=0;j<s;j++)
         for (int k=0;k<s;k++)
         {
-            materials[5 + i * s * s + j * s + k].refColor = V3( s/(float)i,s/(float)j,s/(float)k );
+            materials[5 + i * s * s + j * s + k].albedo = V3( s/(float)i,s/(float)j,s/(float)k );
             materials[5 + i * s * s + j * s + k].roughness=1.f;
         }
     }
@@ -1071,9 +1071,13 @@ void LoadGltf()
     } while(0);
 }
 
-// bidirectional reflectance distribution function.
-v3 brdf(material_t mat)
+// bi-directional reflectance distribution function.
+v3 brdf(material_t &mat)
 {
-
+    if (mat.albedoIdx==0){
+        return mat.albedo;
+    }else{
+        assert(false);
+    }
     return V3(1.f,1.f,1.f);
 }
