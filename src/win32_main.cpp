@@ -329,7 +329,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                             RandomBilateral()
                         )
                     );
-                    rayDirection = Normalize(Lerp(randomBounce, pureBounce, mat.scatter));
+                    rayDirection = Normalize(Lerp(pureBounce, randomBounce, mat.roughness));
                     
 #if 0
                     if (bounceCount<MAX_BOUNCE_COUNT-1) { 
@@ -617,11 +617,14 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     image = AllocateImage(winInfo.width, winInfo.height);    
     materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     materials[1].refColor = V3(0.5f, 0.5f, 0.5f);
+    materials[1].roughness = 1.f;
     //materials[1].emitColor = V3(0.3f, 0.0f, 0.0f);
     materials[2].refColor = V3(0.7f, 0.25f, 0.3f);
+    materials[2].roughness = 1.f;
     materials[3].refColor = V3(0.0f, 0.8f, 0.0f);
-    materials[3].scatter = 1.0f;
+    materials[3].roughness = 0.0f;
     materials[4].refColor = V3(0.3f, 0.25f, 0.7f);
+    materials[4].roughness = 1.f;
     { // generate debug materials for occtree voxels.
         int s=1<<LEVELS;
         for (int i=0;i<s;i++)
@@ -629,6 +632,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         for (int k=0;k<s;k++)
         {
             materials[5 + i * s * s + j * s + k].refColor = V3( s/(float)i,s/(float)j,s/(float)k );
+            materials[5 + i * s * s + j * s + k].roughness=1.f;
         }
     }
     planes[0].n = V3(0,0,1);
@@ -654,7 +658,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     world.materials = materials;
     world.planeCount = ARRAY_COUNT(planes);
     world.planes = planes;
-    //world.sphereCount = ARRAY_COUNT(spheres);
+    world.sphereCount = ARRAY_COUNT(spheres);
     world.spheres = spheres;
     //world.aabbCount = ARRAY_COUNT(aabbs);
     world.aabbs = aabbs;
@@ -1070,5 +1074,6 @@ void LoadGltf()
 // bidirectional reflectance distribution function.
 v3 brdf(material_t mat)
 {
+
     return V3(1.f,1.f,1.f);
 }

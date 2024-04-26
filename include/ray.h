@@ -63,7 +63,9 @@ typedef struct material {
     // between the enter and exit locations. Subsurface scattering is a technique that takes this offset into account.
     //
     // "specular" is therefore referring to the light that hit the surface and was reflected, never refracting into it.
-    float scatter; 
+    //
+    // we use the "roughness" term to model how rough the microfacet surface is.
+    float roughness;
 
     /* reflection color = multiplies with the incoming color. */
     v3 refColor; 
