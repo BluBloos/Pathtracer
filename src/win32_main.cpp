@@ -30,44 +30,34 @@ rtas_node_t GenerateAccelerationStructure(world_t *world);
 void LoadGltf();
 
 /*
-Next steps for the software overall:
-
-1. A greater degree in the sophistication of the simulation.
-    - add light sources and shadows
-    - "do the raytrace proper" = have your simulation conform more to the underlying Physics
-    - ray propagation in the medium = volumetric light transport = fog
-
-2. "Do the ratracer proper":
-    - Good resource:
-        - http://www.cs.cornell.edu/courses/cs4620/2013fa/lectures/22mcrt.pdf
-    - Cast rays from our pixels. Hit some point.
-    - consider the light transport equation
-        - what we see for the ray intersection point is
-            - emitted radiance from that point by object hit + light contrib to that point from rest of scene
-    - How much light is arriving at this point?
-        - Direct illumination:
-            - Cast a ray for each light (shadow cast). Can, from this, determine how much
-            light is contributing to this hit point.
-                - The amount of light contrib is based on irradiance amount (light "intensity")
-                and the BSDF func (defining object material).
-            - point lights cast hard shadows
-            - area lights case soft shadows
-        - Global illumination:
-            - Ambient light of the scene
-            - light transport = bounces of light through the scene
-            - energy decay across space due to scattering = attenuation
-            - absorption of energy into volumes = volumetric lighting stuff = fog
-            - refraction rays too!
-        - depth of field
-            - use a lens (with real width) over a pinhole camera (aperature is infinitely small)
-        - monte-carlo integration:
-            - support area light integration for soft shadows by casting many shadow rays 
-            - support rough surfaces that create many normals = jitter reflected rays
-            - shoot random rays through the lens
-            - the 101 for monte-carlo integration:
-                - Plz read here: https://graphics.stanford.edu/courses/cs348b-01/course29.hanrahan.pdf 
-    
-3. Ultimate desired demo = get a monkey mesh in there (that is made of glass)
+TODO:
+APPLICATION:
+- render proper orientation at runtime.
+RENDERING:
+- add light sources: directional, point,area.
+    - to do area lights, e.g. a triangle light, we will need to uniformly sample the light.
+    the approach here is rejection sampling. for N samples, require 2*N (but this will vary
+    depending on the geometry); it's related to the area ratios.
+    - add shadow rays.
+- "god rays" and fog, both via volumetric light transport.
+/ add GLTF loading.
+    X load triangles.
+    X load materials with constant color.
+    - load materials with textures.
+X add rendering of triangle geometry.
+/ accelerate triangle geometry rendering via occtree.
+/ approximate the rendering equation.
+- refraction
+    - different wavelengths refract differently.
+- textures for materials.
+- diffuse and specular interaction with surfaces via fresnel equations.
+- subsurface scattering.
+- physical camera modelling (e.g. lens).
+    - depth of field
+    - exposure
+- accelerate and improve quality with denoising.
+- importance sampling.
+- add early ray termintation via russian roulette.
 */
 
 static unsigned int GetTotalPixelSize(image_32_t image) {
