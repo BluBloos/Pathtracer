@@ -260,10 +260,10 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                             // hit.
                             if ((t > minHitDistance) && (t < hitDistance)) {
                                 hitDistance = t;
-    #if 1
+    #if 0
                                 hitMatIndex = r->bounds.matIndex; // debug.
     #else
-                            hitMatIndex = mesh.matIndex;
+                            hitMatIndex = mesh.matIndices[triIndex*3];
     #endif
                                 nextNormal = n;
                             }
@@ -413,11 +413,26 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
     return radiance;
 }
 
+#define STATIC_MATERIAL_COUNT 5
+#define DYNAMIC_MATERIAL_MAX_COUNT 10
 constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
+int dynamicMaterialCount;
 
 static world_t world = {};
 // populate word with floor and spheres.
-static material_t materials[5 + octtreeDebugMaterialCount ] = {};
+static material_t materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
+
+void AddDynamicMaterial(material_t mat)
+{
+    assert(dynamicMaterialCount<DYNAMIC_MATERIAL_MAX_COUNT);
+    materials[STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+dynamicMaterialCount++]=mat;
+}
+
+int MaterialsCount()
+{
+    return STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+dynamicMaterialCount;
+}
+
 static plane_t planes[1] = {};
 static sphere_t spheres[3] = {};
 static mesh_t meshes[1]={};
@@ -650,11 +665,10 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
     aabbs[0].matIndex = 4;
     meshes[0].points=nullptr;
-    meshes[0].matIndex = 4;
     // load gltf scene.
     LoadGltf();
     meshes[0].pointCount = nc_sbcount(meshes[0].points);
-    world.materialCount = ARRAY_COUNT(materials);
+    world.materialCount = (unsigned int)MaterialsCount();
     world.materials = materials;
     world.planeCount = ARRAY_COUNT(planes);
     world.planes = planes;
@@ -996,7 +1010,22 @@ void LoadGltf()
                         cgltf_primitive prim=mesh->primitives[i];
                         if (prim.type==cgltf_primitive_type_triangles)
                         {
-                            //cgltf_material mat = prim.material;
+                            // create material from gltf data.
+                            cgltf_material *mat = prim.material;
+                            int matIdx=1;
+                            if (mat->has_pbr_metallic_roughness) {
+                                cgltf_pbr_metallic_roughness *metalrough = &mat->pbr_metallic_roughness;//.base_color_factor[4];//cgltf_float
+                                if (metalrough->base_color_texture.texture == NULL) {//support textureless materials.
+                                    material_t Mat={};
+                                    Mat.roughness=1.f;
+                                    Mat.albedo.x=metalrough->base_color_factor[0];
+                                    Mat.albedo.y=metalrough->base_color_factor[1];
+                                    Mat.albedo.z=metalrough->base_color_factor[2];
+                                    AddDynamicMaterial(Mat);// NOTE: we don't care about duplicates.
+                                    matIdx = MaterialsCount() - 1;
+                                }
+                            }
+
                             cgltf_accessor *indices = prim.indices;
 
                             cgltf_float *posData=nullptr;
@@ -1041,6 +1070,9 @@ void LoadGltf()
                                     nc_sbpush(meshes[0].points, v1);
                                     nc_sbpush(meshes[0].points, v2);
                                     nc_sbpush(meshes[0].points, v3);
+                                    nc_sbpush(meshes[0].matIndices, matIdx);
+                                    nc_sbpush(meshes[0].matIndices, matIdx);
+                                    nc_sbpush(meshes[0].matIndices, matIdx);
                                 }
 
                                 free(indexData);
@@ -1050,6 +1082,7 @@ void LoadGltf()
                                 {
                                     v3 v = { posData[j],posData[j+1],posData[j+2] };
                                     nc_sbpush(meshes[0].points, v);
+                                    nc_sbpush(meshes[0].matIndices, matIdx);
                                 }
                             }
 

@@ -89,8 +89,8 @@ typedef struct sphere {
 
 typedef struct mesh {
     v3 *points;
-    unsigned int pointCount;
-    unsigned int matIndex;
+    int *matIndices;
+    unsigned int pointCount;    
 } mesh_t;
 
 struct rtas_node_t
