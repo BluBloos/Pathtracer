@@ -11,14 +11,23 @@
 #define NC_DS_IMPLEMENTATION
 #include "nc_ds.h"
 
-#define MAX_BOUNCE_COUNT 8
-#define THREAD_COUNT 16
+#define MAX_BOUNCE_COUNT 4
+#define THREAD_COUNT 1
 #define THREAD_GROUP_SIZE 32
-#define RAYS_PER_PIXEL 4
+#define RAYS_PER_PIXEL 4              // for antialiasing. 
+#define RENDER_EQUATION_TAP_COUNT 8
 #define MIN_HIT_DISTANCE float(1e-5)
-#define WORLD_SIZE 20.f
+#define WORLD_SIZE 5.0f
+#define LEVELS 6
 
 static HANDLE masterThreadHandle;
+
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
+void visualizer(game_memory_t *gameMemory);
+DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
+DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
+rtas_node_t GenerateAccelerationStructure(world_t *world);
+void LoadGltf();
 
 /*
 Next steps for the software overall:
@@ -105,156 +114,310 @@ bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, 
     return t!=minHitDistance;
 }
 
-static v3 RayCast(world_t *world, v3 rayOrigin, v3 rayDirection) {
-    v3 result = {};
-    float tolerance = TOLERANCE;
-    float minHitDistance =MIN_HIT_DISTANCE;
-    v3 attenuation = V3(1, 1, 1);
-    for (unsigned int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT; ++bounceCount) {
-        float hitDistance = FLT_MAX;
-        unsigned int hitMatIndex = 0;
-        v3 nextNormal = {};
-        // sphere intersection test.
-        for (
-            unsigned int sphereIndex= 0;
-            sphereIndex < world->sphereCount;
-            sphereIndex++
-        ) {
-            sphere_t sphere = world->spheres[sphereIndex];  
-            v3 sphereRelativeRayOrigin = rayOrigin - sphere.p;
-            float a = Dot(rayDirection, rayDirection);
-            float b = 2.0f * Dot(sphereRelativeRayOrigin, rayDirection);
-            float c = Dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
-                - sphere.r * sphere.r;
-            float denom = 2.0f * a;
-            float rootTerm = SquareRoot(b * b - 4.0f * a * c);
-            if (rootTerm > tolerance){
-                // NOTE(Noah): The denominator can never be zero
-                float tp = (-b + rootTerm) / denom;
-                float tn = (-b - rootTerm) / denom;   
-                float t = tp;
-                if ((tn > minHitDistance) && (tn < tp)){
-                    t = tn;
-                }
-                if ((t > minHitDistance) && (t < hitDistance)) {
-                    hitDistance = t;
-                    hitMatIndex = sphere.matIndex;
-                    nextNormal = Normalize(t*rayDirection + sphereRelativeRayOrigin);
+v3 brdf(material_t mat);
+
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
+    
+    float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
+    
+    
+    
+    //v3 attenuation = V3(1, 1, 1);
+
+#if 0
+    int tapCount=1,tapIdxStart=0;
+    // bounceCount == 4.
+    // 4 iterations.
+    // first iter = generates RENDER_EQUATION_TAP_COUNT rays.
+    // next iter  = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT rays.
+    // third iter = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT.
+    // final iter = no arrays generated.
+    constexpr int maxPossibleRays = RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT +
+        (RENDER_EQUATION_TAP_COUNT)*RENDER_EQUATION_TAP_COUNT +
+        RENDER_EQUATION_TAP_COUNT;
+
+    static v3 origins[maxPossibleRays];
+    static v3 directions[maxPossibleRays];
+    static v3 radiances[maxPossibleRays];
+
+    struct HitState /* HitState is the "structure tag" */ {
+        int matIdx;
+        float theta[RENDER_EQUATION_TAP_COUNT];
+    };
+
+    // the "origins" and "directions" store the outgoing rays from a particular surface point.
+    // the "states" array stores the incoming rays at the same point where the outgoing rays emit from.
+    static struct HitState states[maxPossibleRays]={};
+
+    //static int isLive[maxPossibleRays]={};
+
+    origins[0] = o;
+    directions[0] = d;
+    memset(states, 0xDEADBEEF, sizeof(states));
+    //isLive[0]=1;
+#else
+    v3 radiance = {};
+    if (depth>=MAX_BOUNCE_COUNT) return radiance;
+#endif
+    
+    //for (int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT; ++bounceCount) {
+        // NOTE: we use newTapCount idea because rays should only become "live" on the next bounce.
+        //int newTapCount=tapCount;
+
+
+        //for (int tapIdx=tapIdxStart; tapIdx < tapCount; tapIdx++) {
+            v3 rayOrigin,rayDirection;
+
+#if 0
+            
+            rayOrigin=origins[tapIdx];
+            rayDirection=directions[tapIdx];
+            //if (!isLive[tapIdx]) continue;
+#else
+            rayOrigin=o;
+            rayDirection=d;
+#endif
+
+            float hitDistance = FLT_MAX;
+            unsigned int hitMatIndex = 0;
+            v3 nextNormal = {};
+            // sphere intersection test.
+            for (
+                unsigned int sphereIndex= 0;
+                sphereIndex < world->sphereCount;
+                sphereIndex++
+            ) {
+                sphere_t sphere = world->spheres[sphereIndex];  
+                v3 sphereRelativeRayOrigin = rayOrigin - sphere.p;
+                float a = Dot(rayDirection, rayDirection);
+                float b = 2.0f * Dot(sphereRelativeRayOrigin, rayDirection);
+                float c = Dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
+                    - sphere.r * sphere.r;
+                float denom = 2.0f * a;
+                float rootTerm = SquareRoot(b * b - 4.0f * a * c);
+                if (rootTerm > tolerance){
+                    // NOTE(Noah): The denominator can never be zero
+                    float tp = (-b + rootTerm) / denom;
+                    float tn = (-b - rootTerm) / denom;   
+                    float t = tp;
+                    if ((tn > minHitDistance) && (tn < tp)){
+                        t = tn;
+                    }
+                    if ((t > minHitDistance) && (t < hitDistance)) {
+                        hitDistance = t;
+                        hitMatIndex = sphere.matIndex;
+                        nextNormal = Normalize(t*rayDirection + sphereRelativeRayOrigin);
+                    }
                 }
             }
-        }
-        // floor intersection test
-        for (
-            unsigned int planeIndex = 0;
-            planeIndex < world->planeCount;
-            planeIndex++
-        ) {
-            plane_t plane = world->planes[planeIndex];  
-            float denom = Dot(plane.n, rayDirection);
-            if ((denom < -tolerance) || (denom > tolerance)) {
-                float t = (plane.d - Dot(plane.n, rayOrigin)) / denom;
-                if ((t > minHitDistance) && (t < hitDistance)) {
-                    hitDistance = t;
-                    hitMatIndex = plane.matIndex;
-                    nextNormal = plane.n;
-                }
-            } 
-        }
-        // intersection test with the triangles in the world (via an acceleration structure).
-        {
-            rtas_node_t &rtas = world->rtas;
-
-            static thread_local  stack_t<rtas_node_t*> nodes={};
-            if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, rtas.bounds))
-                nc_spush(nodes, &rtas);
-
-            mesh_t &mesh = world->meshes[0];
-
-            while(nc_ssize(nodes))
+            // floor intersection test
+            for (
+                unsigned int planeIndex = 0;
+                planeIndex < world->planeCount;
+                planeIndex++
+            ) {
+                plane_t plane = world->planes[planeIndex];  
+                float denom = Dot(plane.n, rayDirection);
+                if ((denom < -tolerance) || (denom > tolerance)) {
+                    float t = (plane.d - Dot(plane.n, rayOrigin)) / denom;
+                    if ((t > minHitDistance) && (t < hitDistance)) {
+                        hitDistance = t;
+                        hitMatIndex = plane.matIndex;
+                        nextNormal = plane.n;
+                    }
+                } 
+            }
+            // intersection test with the triangles in the world (via an acceleration structure).
             {
-                rtas_node_t *r = nc_spop(nodes);
-                if (r->children)
-                    for (int i=0;i<nc_sbcount(r->children);i++)
-                    {
-                        rtas_node_t *c = &r->children[i];
-                        if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, c->bounds))
-                            nc_spush(nodes, c);
-                    }
-                else // leaf
-                    for (int i=0;i<r->triangleCount;i++)
-                    {
-                        int triIndex = r->triangles[i];
-                        v3 *points = &mesh.points[triIndex*3];
-                        v3 A=points[0];
-                        v3 B=points[1];
-                        v3 C=points[2];
-                        v3 n = Normalize( Cross( B-A, C-A ) );
-                        float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
-                        // hit.
-                        if ((t > minHitDistance) && (t < hitDistance)) {
-                            hitDistance = t;
-                            hitMatIndex = mesh.matIndex;
-                            nextNormal = n;
+                rtas_node_t &rtas = world->rtas;
+
+                static thread_local  stack_t<rtas_node_t*> nodes={};
+                if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, rtas.bounds))
+                    nc_spush(nodes, &rtas);
+
+                mesh_t &mesh = world->meshes[0];
+
+                while(nc_ssize(nodes))
+                {
+                    rtas_node_t *r = nc_spop(nodes);
+                    if (r->children)
+                        for (int i=0;i<nc_sbcount(r->children);i++)
+                        {
+                            rtas_node_t *c = &r->children[i];
+                            if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, c->bounds))
+                                nc_spush(nodes, c);
                         }
+                    else // leaf
+                        for (int i=0;i<r->triangleCount;i++)
+                        {
+                            int triIndex = r->triangles[i];
+                            v3 *points = &mesh.points[triIndex*3];
+                            v3 A=points[0];
+                            v3 B=points[1];
+                            v3 C=points[2];
+                            v3 n = Normalize( Cross( B-A, C-A ) );
+                            float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
+                            // hit.
+                            if ((t > minHitDistance) && (t < hitDistance)) {
+                                hitDistance = t;
+    #if 1
+                                hitMatIndex = r->bounds.matIndex; // debug.
+    #else
+                            hitMatIndex = mesh.matIndex;
+    #endif
+                                nextNormal = n;
+                            }
+                        }
+                }
+            }
+            // AABB intersection test
+            for (
+                unsigned int aabbIndex = 0;
+                aabbIndex < world->aabbCount;
+                aabbIndex++
+            ) {
+                aabb_t box = world->aabbs[aabbIndex];
+
+                bool exitedEarly;
+                int faceHitIdx;
+                // NOTE: the faceNormals array was copied directly from within doesRayIntersectWithAABB2.
+                // this is some garbage and not clean code. 
+                constexpr v3 faceNormals[] = {
+                    // front, back, left, right, top, bottom.
+                    {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
+                };
+                float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
+
+                // check hit.
+                if ((t > minHitDistance) && (t < hitDistance)) {
+                    hitDistance = t;
+                    hitMatIndex = box.matIndex;
+                    nextNormal = faceNormals[faceHitIdx];
+                }
+            }
+            material_t mat = world->materials[hitMatIndex];
+            if (hitMatIndex) { 
+
+                float ks,kd,theta,lastTheta,NdotL;
+
+                //material_t mat = world->materials[hitMatIndex];
+
+                // the line below accumulates the radiance, considering the outgoing ray from this point,
+                // thus, we need the material and incident angle at where this ray will arrive!
+                //radiance += cos(lastTheta) * Hadamard(incomingRadiance, brdf(lastMat));
+
+                // whereas the accumulate due to emission is via material at point for this outgoing ray.
+                //radiance += mat.emitColor;
+                
+                // NOTE: so this approach is similar to the discrete volume rendering integral.
+                // and its like we are using the local illumination model of Phong.
+                // so you get that product term of Ks (phong) or opacity(volume rendering).
+                //
+                // radiance = radiance + Hadamard(attenuation, mat.emitColor);
+                // attenuation = Hadamard(attenuation, mat.refColor);
+                
+                rayOrigin = rayOrigin + hitDistance * rayDirection;
+                v3 pureBounce = rayDirection - 2.0f * Dot(nextNormal, rayDirection) * nextNormal;
+
+                // spawn the new rays.
+                for (int i=0;i<RENDER_EQUATION_TAP_COUNT;i++)
+                {
+                    v3 randomBounce = Normalize(
+                        nextNormal + V3(
+                            RandomBilateral(),
+                            RandomBilateral(),
+                            RandomBilateral()
+                        )
+                    );
+                    rayDirection = Normalize(Lerp(randomBounce, pureBounce, mat.scatter));
+                    
+#if 0
+                    if (bounceCount<MAX_BOUNCE_COUNT-1) { 
+                        origins[newTapCount] = rayOrigin;
+                        directions[newTapCount] = rayDirection;
+                        isLive[newTapCount]=true;
+                        newTapCount++;
+                        NdotL=theta = Dot(nextNormal,rayDirection);
+                        states[tapIdx].theta[i] = theta;
+                        //isLive[tapIdx]=false; // kill the parent ray.
+                    } else {
+                        // since the next ray will not accumulate, accumulation needs to happen here.
                     }
-            }
-        }
-        // AABB intersection test
-        for (
-            unsigned int aabbIndex = 0;
-            aabbIndex < world->aabbCount;
-            aabbIndex++
-        ) {
-            aabb_t box = world->aabbs[aabbIndex];
+                } // end for
+            }/*else { // skybox hit.
+                material_t mat = world->materials[0];
+                //radiance = radiance + Hadamard(attenuation, mat.emitColor);
+                radiance += mat.emitColor;
+                //isLive[tapIdx]=false;
+            }*/
+#else
+                    NdotL=theta = Dot(nextNormal,rayDirection);
 
-            bool exitedEarly;
-            int faceHitIdx;
-            // NOTE: the faceNormals array was copied directly from within doesRayIntersectWithAABB2.
-            // this is some garbage and not clean code. 
-            constexpr v3 faceNormals[] = {
-                // front, back, left, right, top, bottom.
-                {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
-            };
-            float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
+                    if (NdotL>0.f)
+                    radiance += (1.f/float(RENDER_EQUATION_TAP_COUNT)) * 
+                        cos(theta) * Hadamard(RayCast(world,rayOrigin,rayDirection,depth+1), brdf(mat));
+                
+                } // end for
+                //radiance += mat.emitColor;
+            } /*else {
+                // skybox hit.
+                
+                //radiance = radiance + Hadamard(attenuation, mat.emitColor);
+                
+                //isLive[tapIdx]=false;
+            } */// end if.
+            radiance += mat.emitColor;
+#endif
+            
+            //states[tapIdx].matIdx=hitMatIndex;
+        //}
+        //tapIdxStart=tapCount;
+        //tapCount=newTapCount;
+    //}
 
-            // check hit.
-            if ((t > minHitDistance) && (t < hitDistance)) {
-                hitDistance = t;
-                hitMatIndex = box.matIndex;
-                nextNormal = faceNormals[faceHitIdx];
+// premature optimization is the root of all evil?
+#if 0
+    // accumulate the radiance, going backwards through the data.
+    // we reduce the tree-structured data as we go through.
+    memset(radiances,0,sizeof(radiances));
+    int stride=RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT;
+    for (int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT-1; ++bounceCount) {
+        for (int j=0;j<RENDER_EQUATION_TAP_COUNT;j++)
+            {
+                int matIndexOut,matIndexIn,idxOut,idxIn;
+                float thetaIn;
+                material_t matOut,matIn;
+
+                idxOut=(j*stride)/RENDER_EQUATION_TAP_COUNT;
+                idxIn=(j*stride);
+                if (idxOut==idxIn) continue;//don't double count radiance.
+
+                matIndexOut=states[idxOut];
+                matIndexIn=states[idxIn].matIndex;
+                if (matIndexIn==0xDEADBEEF) continue;//skip early terminated rays.
+                
+                matOut = world->materials[matIndexOut];
+                matIn = world->materials[matIndexIn];
+
+                radiances[idxIn] += matIn.emitColor;
+
+                if (bounceCount==0) continue; // last level has no incoming rays.
+                thetaIn = states[idxOut].theta[j];
+                radiances[idxOut] += cos(thetaIn) * Hadamard(radiances[idxIn], brdf(matOut));            
             }
-        }
-        if (hitMatIndex) {
-            material_t mat = world->materials[hitMatIndex];
-            //TODO(Noah): Do real reflectance stuff
-            result = result + Hadamard(attenuation, mat.emitColor);
-            attenuation = Hadamard(attenuation, mat.refColor);
-            rayOrigin = rayOrigin + hitDistance * rayDirection;
-            //NOTE(Noah): this does a reflection thing
-            //TODO(Noah): these are not accurate permutations
-            v3 pureBounce = 
-                rayDirection - 2.0f * Dot(nextNormal, rayDirection) * nextNormal;
-            v3 randomBounce = Normalize(
-                nextNormal + V3(
-                    RandomBilateral(),
-                    RandomBilateral(),
-                    RandomBilateral()
-                )
-            );
-            rayDirection = Normalize(Lerp(randomBounce, pureBounce, mat.scatter));
-        }
-        else {
-            material_t mat = world->materials[hitMatIndex];
-            result = result + Hadamard(attenuation, mat.emitColor);
-            break;
-        }
+        stride/=RENDER_EQUATION_TAP_COUNT;
     }
-    return result;   
+#endif
+
+    // divide by tapCount is OK here and agrees with rendering eq due to linearity of integrals.
+    return radiance;
 }
+
+constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
 
 static world_t world = {};
 // populate word with floor and spheres.
-static material_t materials[5] = {};
+static material_t materials[5 + octtreeDebugMaterialCount ] = {};
 static plane_t planes[1] = {};
 static sphere_t spheres[3] = {};
 static mesh_t meshes[1]={};
@@ -336,7 +499,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                     v3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
                     v3 rayOrigin = cameraP;
                     v3 rayDirection = Normalize(filmP - cameraP);
-                    color = color + contrib * RayCast(&world, rayOrigin, rayDirection);
+                    color = color + contrib * RayCast(&world, rayOrigin, rayDirection,0);
                 }
                 v4 BMPColor = {
                     255.0f * LinearToSRGB(color.r),
@@ -448,19 +611,26 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
     ExitThread(0);
 }
 
-rtas_node_t GenerateAccelerationStructure(world_t *world);
-void LoadGltf();
-
 void automata_engine::Init(game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     image = AllocateImage(winInfo.width, winInfo.height);    
     materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     materials[1].refColor = V3(0.5f, 0.5f, 0.5f);
+    //materials[1].emitColor = V3(0.3f, 0.0f, 0.0f);
     materials[2].refColor = V3(0.7f, 0.25f, 0.3f);
     materials[3].refColor = V3(0.0f, 0.8f, 0.0f);
     materials[3].scatter = 1.0f;
     materials[4].refColor = V3(0.3f, 0.25f, 0.7f);
+    { // generate debug materials for occtree voxels.
+        int s=1<<LEVELS;
+        for (int i=0;i<s;i++)
+        for (int j=0;j<s;j++)
+        for (int k=0;k<s;k++)
+        {
+            materials[5 + i * s * s + j * s + k].refColor = V3( s/(float)i,s/(float)j,s/(float)k );
+        }
+    }
     planes[0].n = V3(0,0,1);
     planes[0].d = 0; // plane on origin
     planes[0].matIndex = 1;
@@ -530,12 +700,9 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
 void AdoptChildren(rtas_node_t &node, rtas_node_t B);
 
-
 rtas_node_t GenerateAccelerationStructure(world_t *world)
 {
     rtas_node_t accel;
-
-#define LEVELS 5
 
     float sep = WORLD_SIZE / float(1<<LEVELS);
     int leavesCount, nodesCount, halfLeavesCount;
@@ -582,6 +749,11 @@ rtas_node_t GenerateAccelerationStructure(world_t *world)
         ) {
             v3 *points = &mesh.points[triIndex*3];
 
+            v3 vxMax,vxMin,vyMax,vyMin,vzMax,vzMin;
+            int xMax,xMin,yMax,yMin,zMax,zMin;
+            xMax=yMax=zMax=-leavesCount-1;
+            xMin=yMin=zMin=leavesCount+1;
+
             for(int i=0;i<3;i++)
             {
                 v3 A=points[i];
@@ -607,15 +779,101 @@ rtas_node_t GenerateAccelerationStructure(world_t *world)
                 assert(y>=0);
                 assert(z>=0);
 
+                if (x<xMin)xMin=x,vxMin=A;
+                if (y<yMin)yMin=y,vyMin=A;
+                if (z<zMin)zMin=z,vzMin=A;
+                if (x>xMax)xMax=x,vxMax=A;
+                if (y>yMax)yMax=y,vyMax=A;
+                if (z>zMax)zMax=z,vzMax=A;                
+
                 index=z*leavesCount*leavesCount + y * leavesCount + x;
                 
                 assert(index>=0&&index<nodesCount && 
                     "triangle is out of the world bounds!\n"
                     "either extend the world bounds or move the triangle.");
+
+                /*
+                the swiss cheese issue is where the voxels get so small that all of A B and C verts are not in it,
+                but the triangle is still intersecting with the AABB.
+
+                solution:                                      construct the triangle edges and intersect those with AABB.
+                bigger brain solution:                         realize that the fundamental issue is the poor AABB. we don't actually want
+                                                               there to be voxels so small not a single triangle vertex is within it.
+                the universe cannot contain my brian solution: realize that the above is a pipe dream and won't happen
+                                                               for an octree and generalized geometry.
+                oh wait, I'm not smart!              solution: you can't just do the lines because triangles are solid things. in fact,
+                                                               what we are doing here is the rasterization algorithm but in 3d.
+                                                               
+                                                               feels like: we can get the bounds (in voxel coords) of the 3d planar triangle
+                                                               and do a plane collision with each AABB in volume given by the voxel extent.
+                                                               --- I know this to not work, from just a single negative example I ideated. 
+
+                                                               brute force: do the plane collision with bounds, for all collision points, check
+                                                               if inside the triangle.
+
+                                                               sloppy joe: y=mx+b (plane) with a width (use math to iter across indices).
+
+                                                               a not so sloppy joe after all: take the above and relate it to precise raymarch.
+                                                               when iter, "whichever is shorter". based on slope. the gradient of the plane is
+                                                               thus what we care about, that's a v3.
+                                                                   
+                */
+                //bool FiniteLineIntersectsWithAABB(v3 A, v3 B, float minHitDistance, aabb_t box);
                 
+#if 0
+                int triangleCount=ma(z,y,x).triangleCount;
+                bool goodToGo=true;
+                for (int j=0;j<3 && (triangleCount - 1 - j>=0);j++)//check for duplicates.
+                {
+                    if (ma(z,y,x).triangles[triangleCount-1-j]==triIndex)
+                    goodToGo=false;
+                }
+                if (goodToGo)
+                {
+                    nc_sbpush( ma(z,y,x).triangles,triIndex );
+                    ma(z,y,x).triangleCount++;
+                }
+#endif
+            }
+
+            // iterate through the barycentric coordinates.
+            v3 a,b;
+            //=vxMax-vxMin;
+            //v3 b=vyMax-vyMin;
+            //float zxGrad,zyGrad;
+            //zxGrad=a.z;
+            //zyGrad=b.z;
+            v3 A=points[0];
+            v3 B=points[1];
+            v3 C=points[2];
+            //v3 n = Normalize( Cross( B-A, C-A ) );
+            a=B-A;
+            b=C-A;
+
+            for (int z = zMin; z <= zMax; z++)
+            for (int y = yMin; y <= yMax; y++)
+            for (int x = xMin; x <= xMax; x++)
+            {
+#if 0
+                // check for reject.
+                float beta1,alpha1;
+                alpha1=(x-xMin)/float(xMax-xMin);
+                beta1=(y-yMin)/float(yMax-yMin);
+
+                if (alpha1+beta1>=1.f) continue;
+                
+                // check Z reject.
+                float alpha2,beta2;
+                alpha2=(x-xMin+1)/float(xMax-xMin);
+                beta2=(y-yMin+1)/float(yMax-yMin);
+                float zBegin=vxMin.z+alpha1*zxGrad+beta1*zyGrad;
+                float zEnd=vxMin.z+alpha2*zxGrad+beta2*zyGrad;
+                if (  float(z)>zEnd || float(z)<zBegin ) continue;                
+#endif
+
                 nc_sbpush( ma(z,y,x).triangles,triIndex );
                 ma(z,y,x).triangleCount++;
-            }            
+            }
         }
     }
 
@@ -624,6 +882,7 @@ rtas_node_t GenerateAccelerationStructure(world_t *world)
     for (int x = 0; x < (leavesCount); x++)
     {
         aabb_t box = jackma(z,y,x);
+        box.matIndex = z * leavesCount * leavesCount + y * leavesCount + x;
         ma(z,y,x).bounds=box;
     }
 
@@ -806,4 +1065,10 @@ void LoadGltf()
 
         cgltf_free(data);
     } while(0);
+}
+
+// bidirectional reflectance distribution function.
+v3 brdf(material_t mat)
+{
+    return V3(1.f,1.f,1.f);
 }
