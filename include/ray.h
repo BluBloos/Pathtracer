@@ -71,6 +71,8 @@ typedef struct material {
     v3 albedo; // if there is no albedo texture.
     
     v3 emitColor;
+
+    float refractionIndex;
 } material_t;
 
 // plane equation

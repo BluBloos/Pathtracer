@@ -260,6 +260,10 @@ static float RayIntersectPlane(v3 rayOrigin, v3 rayDirection, v3 N, float d, flo
     return minHit;
 }
 
+static float Square(float a){
+    return a*a;
+}
+
 static float RayIntersectTri(v3 rayOrigin, v3 rayDirection, float minHit, v3 &A, v3 &B, v3 &C, v3 &N) {
     // Locate the plane that the points are on.
     // Find the point of the ray on the plane.

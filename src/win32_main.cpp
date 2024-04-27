@@ -20,6 +20,7 @@
 #define WORLD_SIZE 5.0f
 #define LEVELS 6
 #define IMAGE_FOCAL_LENGTH 5.f
+#define N_AIR 1.003f
 
 static HANDLE masterThreadHandle;
 
@@ -110,9 +111,7 @@ v3 brdf(material_t &mat);
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
     
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
-    
-    
-    
+     
     //v3 attenuation = V3(1, 1, 1);
 
 #if 0
@@ -286,23 +285,19 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
             material_t mat = world->materials[hitMatIndex];
             if (hitMatIndex) { 
 
-                float ks,kd,theta,lastTheta,NdotL;
+                float ks,kd,cosTheta,NdotL,R0;
 
-                //material_t mat = world->materials[hitMatIndex];
-
-                // the line below accumulates the radiance, considering the outgoing ray from this point,
-                // thus, we need the material and incident angle at where this ray will arrive!
-                //radiance += cos(lastTheta) * Hadamard(incomingRadiance, brdf(lastMat));
-
-                // whereas the accumulate due to emission is via material at point for this outgoing ray.
-                //radiance += mat.emitColor;
-                
-                // NOTE: so this approach is similar to the discrete volume rendering integral.
-                // and its like we are using the local illumination model of Phong.
-                // so you get that product term of Ks (phong) or opacity(volume rendering).
+                // How much light is transmitted and how much is reflected?
+                // it changes depending on the angle of incidence and the material interface
+                // properties; it also depends if the light is p or s-polarized.
                 //
-                // radiance = radiance + Hadamard(attenuation, mat.emitColor);
-                // attenuation = Hadamard(attenuation, mat.albedo);
+                // here, ks is the amount of reflected light and kd is the amount of trasmitted light.
+                //
+                // but alas, because we don't care about being that accurate, we can just use
+                // Schlick's approximation: https://en.wikipedia.org/wiki/Schlick%27s_approximation.
+                R0 = Square(N_AIR-mat.refractionIndex)/(N_AIR+mat.refractionIndex);
+                //ks = 
+
                 
                 rayOrigin = rayOrigin + hitDistance * rayDirection;
                 v3 pureBounce = rayDirection - 2.0f * Dot(nextNormal, rayDirection) * nextNormal;
@@ -339,11 +334,11 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                 //isLive[tapIdx]=false;
             }*/
 #else
-                    NdotL=theta = Dot(nextNormal,rayDirection);
+                    NdotL=cosTheta = Dot(nextNormal,rayDirection);
 
                     if (NdotL>0.f)
                     radiance += (1.f/float(RENDER_EQUATION_TAP_COUNT)) * 
-                        cos(theta) * Hadamard(RayCast(world,rayOrigin,rayDirection,depth+1), brdf(mat));
+                        cosTheta * Hadamard(RayCast(world,rayOrigin,rayDirection,depth+1), brdf(mat));
                 
                 } // end for
                 //radiance += mat.emitColor;
