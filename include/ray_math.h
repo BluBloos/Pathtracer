@@ -157,6 +157,11 @@ inline float SquareRoot(float a) {
     return result;
 }
 
+inline v2 V2(float x, float y) {
+    v2 newv2 = {x, y};
+    return newv2;
+}
+
 inline v3 V3(float x, float y, float z) {
     v3 newv3 = {x, y, z};
     return newv3;
@@ -246,16 +251,25 @@ static float LinearToSRGB(float L) {
     return S;
 }
 
+static float RayIntersectPlane(v3 rayOrigin, v3 rayDirection, v3 N, float d, float minHit) {
+    float denom = Dot(N, rayDirection);
+    if ((denom < -TOLERANCE) || (denom > TOLERANCE)) {
+        float t = (d - Dot(N, rayOrigin)) / denom;
+        return t;
+    }
+    return minHit;
+}
+
 static float RayIntersectTri(v3 rayOrigin, v3 rayDirection, float minHit, v3 &A, v3 &B, v3 &C, v3 &N) {
     // Locate the plane that the points are on.
     // Find the point of the ray on the plane.
     // Compute the barycentric coordinates of the plane point.
     // check that they all add to 1 and are all positive, if so, we're in the triangle.
 
-    float denom = Dot(N, rayDirection);
-    if ((denom < -TOLERANCE) || (denom > TOLERANCE)) {
         float d = Dot(A, N);
-        float t = (d - Dot(N, rayOrigin)) / denom;
+
+    float t=RayIntersectPlane(rayOrigin,rayDirection,N,d, minHit);
+    if(t!=minHit) {
 
         v3 x = rayOrigin + t*rayDirection;
         v3 a = B-A;

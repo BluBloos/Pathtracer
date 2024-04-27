@@ -12,13 +12,14 @@
 #include "nc_ds.h"
 
 #define MAX_BOUNCE_COUNT 4
-#define THREAD_COUNT 1
+#define THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
 #define RAYS_PER_PIXEL 4              // for antialiasing. 
 #define RENDER_EQUATION_TAP_COUNT 8
 #define MIN_HIT_DISTANCE float(1e-5)
 #define WORLD_SIZE 5.0f
 #define LEVELS 6
+#define IMAGE_FOCAL_LENGTH 5.f
 
 static HANDLE masterThreadHandle;
 
@@ -206,16 +207,13 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                 planeIndex < world->planeCount;
                 planeIndex++
             ) {
-                plane_t plane = world->planes[planeIndex];  
-                float denom = Dot(plane.n, rayDirection);
-                if ((denom < -tolerance) || (denom > tolerance)) {
-                    float t = (plane.d - Dot(plane.n, rayOrigin)) / denom;
-                    if ((t > minHitDistance) && (t < hitDistance)) {
-                        hitDistance = t;
-                        hitMatIndex = plane.matIndex;
-                        nextNormal = plane.n;
-                    }
-                } 
+                plane_t plane = world->planes[planeIndex];
+                float t=RayIntersectPlane(rayOrigin, rayDirection, plane.n, plane.d, minHitDistance);
+                if ((t > minHitDistance) && (t < hitDistance)) {
+                    hitDistance = t;
+                    hitMatIndex = plane.matIndex;
+                    nextNormal = plane.n;
+                }
             }
             // intersection test with the triangles in the world (via an acceleration structure).
             {
@@ -431,9 +429,9 @@ static v3 cameraP = {};
 static v3 cameraZ = {};
 static v3 cameraX = {};
 static v3 cameraY = {};
-static float filmDist = 1.0f;
-static float filmW = 1.0f;
-static float filmH = 1.0f;
+static float filmDist = 0.1f;//10cm.
+static float filmW = 0.1f;
+static float filmH = 0.1f;
 static float halfFilmW;
 static float halfFilmH;
 static v3 filmCenter;
@@ -473,6 +471,8 @@ typedef struct texel {
     uint32_t yPos;
 } texel_t;
 
+constexpr bool use_pinhole=false;
+
 // NOTE(Noah): 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
 // 
@@ -497,15 +497,77 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
             for (unsigned int x = texel.xPos; x < (texel.width + texel.xPos); x++) {
                 float filmX = -1.0f + 2.0f * (float)x / (float)image.width;
                 v3 color = {};
-                float contrib = 1.0f / (float)raysPerPixel;
-                for (unsigned int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) {
-                    float offX = filmX + (RandomBilateral() * halfPixW);
-                    float offY = filmY + (RandomBilateral() * halfPixH);
-                    v3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
-                    v3 rayOrigin = cameraP;
-                    v3 rayDirection = Normalize(filmP - cameraP);
-                    color = color + contrib * RayCast(&world, rayOrigin, rayDirection,0);
+
+                if constexpr( use_pinhole ) {
+                    float contrib = 1.0f / (float)raysPerPixel;
+                    for (unsigned int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) {
+                        float offX = filmX + (RandomBilateral() * halfPixW);
+                        float offY = filmY + (RandomBilateral() * halfPixH);
+                        v3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
+                        v3 rayOrigin = cameraP;
+                        v3 rayDirection = Normalize(filmP - cameraP);
+                        color = color + contrib * RayCast(&world, rayOrigin, rayDirection,0);
+                    }
+                } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
+                {
+                    float contrib = 1.0f / (float)raysPerPixel/(float)raysPerPixel;
+                    // here, we use a 35mm=3.5cm camera lens disc.
+                    #define LENS_RADIUS 0.035f // scene units are 1 = 1m.
+                    #define FOCAL_LENGTH 0.098f
+
+                    // the poisson disk samples
+                    const int NUM_SAMPLES = 12;     // the number of samples to take.
+                    //const float PI = 3.14159265359f; // the value of PI.
+                    static const v2 poissonDisk[NUM_SAMPLES] = {
+                        V2(0.0, 0.0),
+                        V2(-0.94201624, -0.39906216),
+                        V2(0.94558609, -0.76890725),
+                        V2(-0.094184101, -0.92938870),
+                        V2(0.34495938, 0.29387760),
+                        V2(-0.91588581, 0.45771432),
+                        V2(-0.81544232, -0.87912464),
+                        V2(-0.38277543, 0.27676845),
+                        V2(0.97484398, 0.75648379),
+                        V2(0.44323325, -0.97511554),
+                        V2(0.53742981, -0.47373420),
+                        V2(-0.26496911, -0.41893023)
+                    };
+
+                    for (unsigned int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) { // integrate across image sensor.
+                        
+                        float offX = filmX + (RandomBilateral() * halfPixW);
+                        float offY = filmY + (RandomBilateral() * halfPixH);
+                        v3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
+                        v3 rayOrigin = cameraP;
+                        v3 rayDirection = Normalize(cameraP-filmP);
+
+                        // intersect with focal plane.
+                        // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
+                        // 1/f = 1/v + 1/b.
+                        float focalPlaneDist = 1.f/(1.f/FOCAL_LENGTH - 1.f/filmDist);
+                        v3 planePoint,N= cameraZ,focalPoint;
+                        planePoint = cameraP + cameraX + focalPlaneDist*N;
+                        float d = Dot(N,planePoint);
+
+                        float t=RayIntersectPlane(rayOrigin, rayDirection, N, d, MIN_HIT_DISTANCE);
+                        assert(t!=MIN_HIT_DISTANCE);
+
+                        focalPoint=rayOrigin+t*rayDirection;
+
+                        // sample poisson disk point.
+                        for (unsigned int rayIndex2 = 0; rayIndex2 < raysPerPixel; rayIndex2++) {
+
+                            v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
+                            v3 rayOriginDisk,rayDirectionDisk;
+                            rayOriginDisk = rayOrigin + diskSample.x*LENS_RADIUS*cameraX + diskSample.y*LENS_RADIUS*cameraY;
+                            rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
+
+                            color = color + contrib * RayCast(&world, rayOriginDisk, rayDirectionDisk,0);
+                            
+                        }
+                    }
                 }
+
                 v4 BMPColor = {
                     255.0f * LinearToSRGB(color.r),
                     255.0f * LinearToSRGB(color.g),
@@ -646,7 +708,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     spheres[0].p = V3(0,0,0);
     spheres[0].r = 1.0f;
     spheres[0].matIndex = 2;
-    spheres[1].p = V3(-3,-2,0);
+    spheres[1].p = V3(-1,-5,0);
     spheres[1].r = 1.0f;
     spheres[1].matIndex = 4;
     spheres[2].p = V3(-2,0,2);
@@ -670,8 +732,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     world.meshes = meshes;
     world.rtas = GenerateAccelerationStructure(&world);
     // define camera and characteristics
-    cameraP = V3(0, -10, 1); // go back 10 and up 1
-    cameraZ = Normalize(cameraP);
+    cameraP = V3(0, -10, 1); //  /* go back 10 and up 1 */ : V3(0, 10, 1); /* look down negative Z for physical camera */ 
+    cameraZ = (use_pinhole)? Normalize(cameraP) : -Normalize(cameraP);
     cameraX = Normalize(Cross(V3(0,0,1), cameraZ));
     cameraY = Normalize(Cross(cameraZ, cameraX));
     if (image.width > image.height) {
@@ -679,6 +741,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     } else if (image.height > image.width) {
         filmW = filmH * (float)image.width / (float)image.height;
     }
+    if (!use_pinhole)
+        filmDist=1.f/(1.f/FOCAL_LENGTH-1.f/IMAGE_FOCAL_LENGTH);
     halfFilmW = filmW / 2.0f;
     halfFilmH = filmH / 2.0f;
     filmCenter = cameraP - filmDist * cameraZ;
