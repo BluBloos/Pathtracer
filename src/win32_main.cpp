@@ -14,7 +14,7 @@
 #define MAX_BOUNCE_COUNT 4
 #define THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
-#define RAYS_PER_PIXEL 4              // for antialiasing. 
+#define RAYS_PER_PIXEL 4              // for antialiasing.
 #define RENDER_EQUATION_TAP_COUNT 8
 #define MIN_HIT_DISTANCE float(1e-5)
 #define WORLD_SIZE 5.0f
@@ -30,6 +30,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
 rtas_node_t GenerateAccelerationStructure(world_t *world);
 void LoadGltf();
+bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
 
 /*
 TODO:
@@ -285,7 +286,10 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
             material_t mat = world->materials[hitMatIndex];
             if (hitMatIndex) { 
 
-                float ks,kd,cosTheta,NdotL,R0;
+                float ks,kd,cosTheta,NdotL,F0;
+
+                cosTheta=(Dot(nextNormal, rayDirection));
+                cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
 
                 // How much light is transmitted and how much is reflected?
                 // it changes depending on the angle of incidence and the material interface
@@ -295,24 +299,35 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                 //
                 // but alas, because we don't care about being that accurate, we can just use
                 // Schlick's approximation: https://en.wikipedia.org/wiki/Schlick%27s_approximation.
-                R0 = Square(N_AIR-mat.refractionIndex)/(N_AIR+mat.refractionIndex);
-                //ks = 
+                F0 = Square((N_AIR-mat.refractionIndex)/(N_AIR+mat.refractionIndex));
+                ks = F0+(1.f-F0)*powf(1.f-fabsf(cosTheta),5.f);
+                kd=1.f-ks;
+                assert(ks>=0.f&&ks<=1.f);
 
-                
+#if 0
+                int bounceCount=RENDER_EQUATION_TAP_COUNT*ks;//for now, let all transmitted light be gobbled up by the object, never to be seen again.
+                if (!bounceCount)bounceCount=1;//don't allow our low tap rate to produce black holes.
+#else
+                int bounceCount = RENDER_EQUATION_TAP_COUNT;
+#endif
                 rayOrigin = rayOrigin + hitDistance * rayDirection;
-                v3 pureBounce = rayDirection - 2.0f * Dot(nextNormal, rayDirection) * nextNormal;
+                v3 pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
 
                 // spawn the new rays.
-                for (int i=0;i<RENDER_EQUATION_TAP_COUNT;i++)
+                for (int i=0;i<bounceCount;i++)
                 {
+                    float ks_local,kd_local;
+                    v3 rayDirBounce,halfVector,N;
+                    N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
+
                     v3 randomBounce = Normalize(
-                        nextNormal + V3(
+                        (N) + V3(
                             RandomBilateral(),
                             RandomBilateral(),
                             RandomBilateral()
                         )
                     );
-                    rayDirection = Normalize(Lerp(pureBounce, randomBounce, mat.roughness));
+                    rayDirBounce = Normalize(Lerp(pureBounce, randomBounce, mat.roughness));
                     
 #if 0
                     if (bounceCount<MAX_BOUNCE_COUNT-1) { 
@@ -326,31 +341,45 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                     } else {
                         // since the next ray will not accumulate, accumulation needs to happen here.
                     }
-                } // end for
-            }/*else { // skybox hit.
-                material_t mat = world->materials[0];
-                //radiance = radiance + Hadamard(attenuation, mat.emitColor);
-                radiance += mat.emitColor;
-                //isLive[tapIdx]=false;
-            }*/
 #else
-                    NdotL=cosTheta = Dot(nextNormal,rayDirection);
+                    halfVector =(1.f/Magnitude(rayDirBounce-rayDirection)) * (rayDirBounce-rayDirection);
+                    cosTheta=Dot(halfVector,rayDirBounce);
 
-                    if (NdotL>0.f)
-                    radiance += (1.f/float(RENDER_EQUATION_TAP_COUNT)) * 
-                        cosTheta * Hadamard(RayCast(world,rayOrigin,rayDirection,depth+1), brdf(mat));
-                
-                } // end for
-                //radiance += mat.emitColor;
-            } /*else {
-                // skybox hit.
-                
-                //radiance = radiance + Hadamard(attenuation, mat.emitColor);
-                
-                //isLive[tapIdx]=false;
-            } */// end if.
-            radiance += mat.emitColor;
+                    if (Dot(N, rayDirBounce)>0.f) {
+
+                        assert(cosTheta>=0.f);
+
+                        ks_local = F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
+                        kd_local=1.f-ks_local;
+                        assert(ks_local>=0.f&&ks_local<=1.f);
+                        
+                        radiance += (1.f/float(RENDER_EQUATION_TAP_COUNT)) *
+                            Hadamard(RayCast(world,rayOrigin,rayDirBounce,depth+1), kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
+                    }
 #endif
+                } // end for
+
+                // How to think about the refraction ray?
+                // it doesn't really have anything to do with the BRDF.
+                // it's simply where we continue along the same ray path,
+                // but there's a bend in the path along the way (due to the interface).
+                // and we treat the geometry as "participating media", where
+                // there is some absorption when transporting through a translucent
+                // material.
+                
+                // coming up through a transparent surface
+                // with the reflection ray calculated as 'Iout' above.  The blend
+                // should be 'opacity' of the reflected ray and '1-opacity' of the
+                // refracted ray.
+
+                if (mat.alpha < 1.0f) { // not completely opaque
+
+                    v3 refractionDirection;
+                    if (FindRefractionDirection(rayDirection, nextNormal, mat.refractionIndex, refractionDirection))
+                        radiance += kd*(1.f-mat.alpha) * RayCast(world, rayOrigin, refractionDirection, depth);
+                }
+            }
+            radiance += mat.emitColor;
             
             //states[tapIdx].matIdx=hitMatIndex;
         //}
@@ -417,7 +446,7 @@ int MaterialsCount()
 }
 
 static plane_t planes[1] = {};
-static sphere_t spheres[3] = {};
+static sphere_t spheres[4] = {};
 static mesh_t meshes[1]={};
 static aabb_t aabbs[1]={};
 static v3 cameraP = {};
@@ -680,13 +709,18 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
     materials[1].roughness = 1.f;
+    materials[1].refractionIndex=1.f; // amber.
     //materials[1].emitColor = V3(0.3f, 0.0f, 0.0f);
     materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
     materials[2].roughness = 1.f;
+    materials[2].refractionIndex=2.417f; // diamond.
+    materials[2].alpha=0.0f; // diamond.
     materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
     materials[3].roughness = 0.0f;
+    materials[3].refractionIndex=1.31f; // ice.    
     materials[4].albedo = V3(0.3f, 0.25f, 0.7f);
     materials[4].roughness = 1.f;
+    materials[4].refractionIndex=1.544f; // fused silica; a pure form of glass.    
     { // generate debug materials for occtree voxels.
         int s=1<<LEVELS;
         for (int i=0;i<s;i++)
@@ -695,6 +729,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         {
             materials[5 + i * s * s + j * s + k].albedo = V3( s/(float)i,s/(float)j,s/(float)k );
             materials[5 + i * s * s + j * s + k].roughness=1.f;
+            materials[5 + i * s * s + j * s + k].refractionIndex=1.f;
         }
     }
     planes[0].n = V3(0,0,1);
@@ -709,6 +744,9 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     spheres[2].p = V3(-2,0,2);
     spheres[2].r = 1.0f;
     spheres[2].matIndex = 3;
+    spheres[3].p = V3(1,-7,0);
+    spheres[3].r = 1.0f;
+    spheres[3].matIndex = 3;
     aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
     aabbs[0].matIndex = 4;
     meshes[0].points=nullptr;
@@ -1070,6 +1108,7 @@ void LoadGltf()
                                     Mat.albedo.x=metalrough->base_color_factor[0];
                                     Mat.albedo.y=metalrough->base_color_factor[1];
                                     Mat.albedo.z=metalrough->base_color_factor[2];
+                                    Mat.refractionIndex=2.417f;//diamond.
                                     AddDynamicMaterial(Mat);// NOTE: we don't care about duplicates.
                                     matIdx = MaterialsCount() - 1;
                                 }
@@ -1162,4 +1201,48 @@ v3 brdf(material_t &mat)
         assert(false);
     }
     return V3(1.f,1.f,1.f);
+}
+
+// Find the refraction direction of a ray that is *arriving* in
+// direction 'rayDir' at an air/glass interface with outward-pointing
+// normal 'N'.  If the ray is entering the surface, assume an
+// air-to-glass transition.  Otherwise, assume a glass-to-air
+// transition.  Use Snell's Law and the indices of refraction of glass
+// and air to set 'refractionDir'.
+//
+// Return true if a value is returned in 'refractionDir'.  Return
+// false if there's total internal reflection (hence, no refraction).
+bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir )
+{
+    float nair, n1, n2, theta1, theta2, LHS;
+    
+    nair = 1.008f;
+
+    if ((Dot(N,rayDir)) < 0) {
+        // air-to-glass transition.
+        n1 = nair;
+        n2 = nglass;
+        N = -1.f * N;
+    }
+    else {
+        // glass-to-air transition.
+        n1 = nglass;
+        n2 = nair;
+    }
+
+    theta1 = acos(Dot(N,rayDir));
+    
+    // check for TIR.
+    LHS = n1 / n2 * sin(theta1);
+    if (LHS > 1.f) {
+        return false;
+    }
+    theta2 = asin(LHS);
+
+    v3 M = Cross(N, Cross(rayDir, N));
+    M = Normalize(M);
+
+    refractionDir = cos(theta2) * N + LHS * M;
+
+    return true;
 }

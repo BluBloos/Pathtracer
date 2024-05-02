@@ -235,6 +235,14 @@ inline v3 Lerp(v3 a, v3 b, float p) {
     return (1.0f - p) * a + p * b;
 }
 
+inline float Lerp1f(float a, float b, float t){
+    return (1.0f - t) * a + t * b;
+}
+
+inline float Smoothstep(float a) {
+    return 3.f*a*a-2.f*a*a*a;
+}
+
 // the version of linear to sRGB that is presumably correct?
 // as opposed to the linear approx version ...
 static float LinearToSRGB(float L) {
