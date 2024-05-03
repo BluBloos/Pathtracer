@@ -43,7 +43,7 @@ inline v2 operator-(v2 a, v2 b) {
     return result;
 }
 
-struct v3 {
+typedef struct {
     union {
         struct {
             float x, y, z;
@@ -52,7 +52,7 @@ struct v3 {
             float r, g, b;
         };
     };
-};
+} v3;
 
 inline v3 &operator+=(v3 &a, v3 b) {
     a.x = a.x + b.x;

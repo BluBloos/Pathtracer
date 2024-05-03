@@ -28,6 +28,7 @@
 #define FOCAL_LENGTH 0.098f
 
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
+static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
 void visualizer(game_memory_t *gameMemory);
 DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
@@ -38,6 +39,7 @@ v3 brdf(material_t &mat);
 
 constexpr bool use_pinhole=false;
 static world_t g_world = {};
+static light_t g_lights[1]={};
 constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
 static int g_dynamicMaterialCount;
 static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
@@ -83,20 +85,22 @@ extern char ** __argv;
 TODO:
 APPLICATION:
 X render proper orientation at runtime.
-- save proper orientation.
-X Add cmdline processing.
+/ save proper orientation.
+    - make it granular where we can flip either X or Y, or both.
+/ Add cmdline processing.
     X thread count.
-PERFORMANCE:
-- Use compute shaders.
-- "Some threads finish all their texels, while others are still working" - we are wasting potential good work!
-   We need the master thread to notice and assign those lazy threads more work.
-- SIMD?
+    - output image filepath; dynamically find extension and output based on that.
+- usage/help print if supply -h.
+- use stb_image_write to support .PNG and .JPG.
 RENDERING FEATURES:
-- add light sources: directional, point,area.
+- tonemapping from HDR to 0->1 range.
+/ add light sources: directional, point, area.
+    X directional.
+    - point.
     - to do area lights, e.g. a triangle light, we will need to uniformly sample the light.
     the approach here is rejection sampling. for N samples, require 2*N (but this will vary
     depending on the geometry); it's related to the area ratios.
-    - add shadow rays.
+    X add shadow rays.
 - "god rays" and fog, both via volumetric light transport.
 / add GLTF loading.
     X load triangles.
@@ -105,6 +109,7 @@ RENDERING FEATURES:
 X add rendering of triangle geometry.
 / accelerate triangle geometry rendering via occtree.
 / approximate the rendering equation.
+    - uniform sampling in hemisphere.
 / refraction
     - different wavelengths refract differently.
 - textures for materials.
@@ -116,6 +121,11 @@ X diffuse and specular interaction with surfaces via fresnel equations.
 - accelerate and improve quality with denoising.
 - importance sampling.
 - add early ray termintation via russian roulette.
+PERFORMANCE:
+- Use compute shaders.
+- "Some threads finish all their texels, while others are still working" - we are wasting potential good work!
+   We need the master thread to notice and assign those lazy threads more work.
+- SIMD?
 */
 
 static unsigned int GetTotalPixelSize(image_32_t image) {
@@ -169,64 +179,14 @@ bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, 
     return t!=minHitDistance;
 }
 
-static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
-    
+static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection) {
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
-    v3 rayOrigin, rayDirection, nextNormal = {};
-
-    v3 radiance = {};
-    if (depth>=MAX_BOUNCE_COUNT) return radiance;
-
-    rayOrigin=o;
-    rayDirection=d;
-
-#if 0
-    int tapCount=1,tapIdxStart=0;
-    // bounceCount == 4.
-    // 4 iterations.
-    // first iter = generates RENDER_EQUATION_TAP_COUNT rays.
-    // next iter  = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT rays.
-    // third iter = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT.
-    // final iter = no arrays generated.
-    constexpr int maxPossibleRays = RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT +
-        (RENDER_EQUATION_TAP_COUNT)*RENDER_EQUATION_TAP_COUNT +
-        RENDER_EQUATION_TAP_COUNT;
-
-    static v3 origins[maxPossibleRays];
-    static v3 directions[maxPossibleRays];
-    static v3 radiances[maxPossibleRays];
-
-    struct HitState /* HitState is the "structure tag" */ {
-        int matIdx;
-        float theta[RENDER_EQUATION_TAP_COUNT];
-    };
-
-    // the "origins" and "directions" store the outgoing rays from a particular surface point.
-    // the "states" array stores the incoming rays at the same point where the outgoing rays emit from.
-    static struct HitState states[maxPossibleRays]={};
-
-    //static int isLive[maxPossibleRays]={};
-
-    origins[0] = o;
-    directions[0] = d;
-    memset(states, 0xDEADBEEF, sizeof(states));
-    //isLive[0]=1;
-
-    //for (int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT; ++bounceCount) {
-        // NOTE: we use newTapCount idea because rays should only become "live" on the next bounce.
-        //int newTapCount=tapCount;
-
-
-        //for (int tapIdx=tapIdxStart; tapIdx < tapCount; tapIdx++) {
-
-
-    rayOrigin=origins[tapIdx];
-            rayDirection=directions[tapIdx];
-            //if (!isLive[tapIdx]) continue;
-#endif
-
-    float hitDistance = FLT_MAX;
-    unsigned int hitMatIndex = 0;
+    ray_payload_t p={};
+    p.hitDistance=FLT_MAX;
+    p.hitMatIndex=0;
+    float &hitDistance = p.hitDistance;
+    unsigned int &hitMatIndex = p.hitMatIndex;
+    v3 &nextNormal = p.normal;
 
     // sphere intersection test.
     for (
@@ -342,6 +302,71 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
             nextNormal = faceNormals[faceHitIdx];
         }
     }
+
+    return p;
+}
+
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
+    
+    float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
+    v3 rayOrigin, rayDirection;
+
+    v3 radiance = {};
+    if (depth>=MAX_BOUNCE_COUNT) return radiance;
+
+    rayOrigin=o;
+    rayDirection=d;
+
+#if 0
+    int tapCount=1,tapIdxStart=0;
+    // bounceCount == 4.
+    // 4 iterations.
+    // first iter = generates RENDER_EQUATION_TAP_COUNT rays.
+    // next iter  = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT rays.
+    // third iter = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT.
+    // final iter = no arrays generated.
+    constexpr int maxPossibleRays = RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT +
+        (RENDER_EQUATION_TAP_COUNT)*RENDER_EQUATION_TAP_COUNT +
+        RENDER_EQUATION_TAP_COUNT;
+
+    static v3 origins[maxPossibleRays];
+    static v3 directions[maxPossibleRays];
+    static v3 radiances[maxPossibleRays];
+
+    struct HitState /* HitState is the "structure tag" */ {
+        int matIdx;
+        float theta[RENDER_EQUATION_TAP_COUNT];
+    };
+
+    // the "origins" and "directions" store the outgoing rays from a particular surface point.
+    // the "states" array stores the incoming rays at the same point where the outgoing rays emit from.
+    static struct HitState states[maxPossibleRays]={};
+
+    //static int isLive[maxPossibleRays]={};
+
+    origins[0] = o;
+    directions[0] = d;
+    memset(states, 0xDEADBEEF, sizeof(states));
+    //isLive[0]=1;
+
+    //for (int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT; ++bounceCount) {
+        // NOTE: we use newTapCount idea because rays should only become "live" on the next bounce.
+        //int newTapCount=tapCount;
+
+
+        //for (int tapIdx=tapIdxStart; tapIdx < tapCount; tapIdx++) {
+
+
+    rayOrigin=origins[tapIdx];
+            rayDirection=directions[tapIdx];
+            //if (!isLive[tapIdx]) continue;
+#endif
+
+    ray_payload_t p;
+    float &hitDistance = p.hitDistance;
+    unsigned int &hitMatIndex = p.hitMatIndex;
+    v3 &nextNormal = p.normal;
+    p=RayCastIntersect(world, rayOrigin, rayDirection);
     
     material_t mat = world->materials[hitMatIndex];
     if (hitMatIndex) { 
@@ -434,7 +459,28 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
             if (FindRefractionDirection(rayDirection, nextNormal, mat.refractionIndex, refractionDirection))
                 radiance += kd*(1.f-mat.alpha) * RayCast(world, rayOrigin, refractionDirection, depth);
         }
+
+        // cast the shadow ray(s).
+        for (unsigned int i=0;i<world->lightCount;i++) {
+            light_t &light=world->lights[i];
+            switch(light.kind){
+                case LIGHT_KIND_DIRECTIONAL:
+                {
+                    v3 lightDir=-1.f*light.direction;
+                    auto payload=RayCastIntersect(world,rayOrigin,lightDir);
+                    if (payload.hitMatIndex==0) {
+                        radiance += light.radiance;
+                    }
+                } break;
+                case LIGHT_KIND_POINT:
+                break;
+                case LIGHT_KIND_TRIANGLE:
+                break;
+            }
+        }
+
     } // END IF.
+
     radiance += mat.emitColor;
             
 // premature optimization is the root of all evil?
@@ -727,6 +773,10 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
+    
+    g_lights[0].kind = LIGHT_KIND_DIRECTIONAL;
+    g_lights[0].direction = Normalize(V3(1.f,-1.f,-1.f));
+    g_lights[0].radiance = V3(1.f,1.f,1.f);
     g_materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
     g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
     g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
@@ -766,9 +816,10 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     g_aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
     g_aabbs[0].matIndex = 4;
     g_meshes[0].points=nullptr;
-    // load gltf scene.
     //LoadGltf();
     g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
+    g_world.lightCount = ARRAY_COUNT(g_lights);
+    g_world.lights = g_lights;
     g_world.materialCount = (unsigned int)MaterialsCount();
     g_world.materials = g_materials;
     g_world.planeCount = ARRAY_COUNT(g_planes);

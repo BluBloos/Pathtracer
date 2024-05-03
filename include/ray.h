@@ -3,7 +3,7 @@
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof(array[0]))
 
 #pragma pack(push, 1)
-typedef struct bitmap_header {
+typedef struct {
 	unsigned short FileType;          /* File type, always 4D42h ("BM") */
 	unsigned int FileSize;            /* Size of the file in bytes */
 	unsigned short Reserved1;         /* Always 0 */
@@ -27,7 +27,7 @@ typedef struct bitmap_header {
 } bitmap_header_t;
 #pragma pack(pop)
 
-typedef struct image_32 {
+typedef struct {
     unsigned int width;
     unsigned int height;
     unsigned int *pixelPointer;
@@ -77,49 +77,71 @@ typedef struct material {
 
 // plane equation
 // n dot any point on the plane plus d = 0
-typedef struct plane {
+typedef struct {
     v3 n;
     float d; // coeff in plane eq
     unsigned int matIndex;
 } plane_t;
 
-typedef struct sphere {
+typedef struct {
     v3 p;
     float r;
     unsigned int matIndex;
 } sphere_t;
 
-typedef struct mesh {
+typedef struct {
     v3 *points;
     int *matIndices;
     unsigned int pointCount;    
 } mesh_t;
 
-struct rtas_node_t
-{
+typedef struct rtas_node {
     int *triangles;
     int triangleCount;
-    rtas_node_t *children;
+    rtas_node *children;
     aabb_t bounds;
-};
+} rtas_node_t;
 
-typedef struct texel {
+typedef struct {
     int width;
     int height;
     unsigned int xPos;
     unsigned int yPos;
 } texel_t;
 
+typedef enum {
+    LIGHT_KIND_DIRECTIONAL,
+    LIGHT_KIND_POINT,
+    LIGHT_KIND_TRIANGLE
+} light_kind_t;
+
 typedef struct {
+    light_kind_t kind;
+    union {
+        v3 direction;//directional light.
+        v3 location;//point light.
+    };
+    v3 radiance;
+} light_t;
+
+typedef struct {
+    float hitDistance;
+    unsigned int hitMatIndex;
+    v3 normal;
+} ray_payload_t;
+
+typedef struct {
+    unsigned int lightCount;
+    light_t *lights;
     unsigned int materialCount;
-    material *materials;
+    material_t *materials;
     unsigned int planeCount;
-    plane *planes;
+    plane_t *planes;
     unsigned int sphereCount;
-    sphere *spheres;
+    sphere_t *spheres;
     unsigned int aabbCount;
-    aabb *aabbs;
+    aabb_t *aabbs;
     unsigned int meshCount;
-    mesh *meshes;
+    mesh_t *meshes;
     rtas_node_t rtas;
 } world_t;
