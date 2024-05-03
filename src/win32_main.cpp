@@ -21,8 +21,11 @@
 #define LEVELS 6
 #define IMAGE_FOCAL_LENGTH 5.f
 #define N_AIR 1.003f
-
-static HANDLE masterThreadHandle;
+#define STATIC_MATERIAL_COUNT 5
+#define DYNAMIC_MATERIAL_MAX_COUNT 10
+// here, we use a 35mm=3.5cm camera lens disc.
+#define LENS_RADIUS 0.035f // scene units are 1 = 1m.
+#define FOCAL_LENGTH 0.098f
 
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
 void visualizer(game_memory_t *gameMemory);
@@ -31,12 +34,56 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
 rtas_node_t GenerateAccelerationStructure(world_t *world);
 void LoadGltf();
 bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
+v3 brdf(material_t &mat);
+
+constexpr bool use_pinhole=false;
+static world_t world = {};
+constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
+static int g_dynamicMaterialCount;
+static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
+static plane_t g_planes[1] = {};
+static sphere_t g_spheres[4] = {};
+static mesh_t g_meshes[1]={};
+static aabb_t g_aabbs[1]={};
+
+void AddDynamicMaterial(material_t mat)
+{
+    assert(g_dynamicMaterialCount<DYNAMIC_MATERIAL_MAX_COUNT);
+    g_materials[STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+g_dynamicMaterialCount++]=mat;
+}
+
+int MaterialsCount()
+{
+    return STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+g_dynamicMaterialCount;
+}
+
+static v3 g_cameraP = {};
+static v3 g_cameraZ = {};
+static v3 g_cameraX = {};
+static v3 g_cameraY = {};
+static float g_filmDist = 0.1f;//10cm.
+static float g_filmW = 0.1f;
+static float g_filmH = 0.1f;
+static float g_halfFilmW;
+static float g_halfFilmH;
+static v3 g_filmCenter;
+float g_halfPixW;
+float g_halfPixH;
+constexpr unsigned int raysPerPixel = RAYS_PER_PIXEL;
+image_32_t g_image = {};
+static HANDLE g_masterThreadHandle;
 
 /*
 TODO:
 APPLICATION:
 - render proper orientation at runtime.
-RENDERING:
+- add cmdline processing.
+PERFORMANCE:
+- Use compute shaders.
+- "Some threads finish all their texels, while others are still working" - we are wasting potential good work!
+   We need the master thread to notice and assign those lazy threads more work.
+- SIMD?
+RENDERING FEATURES:
 - add light sources: directional, point,area.
     - to do area lights, e.g. a triangle light, we will need to uniformly sample the light.
     the approach here is rejection sampling. for N samples, require 2*N (but this will vary
@@ -50,13 +97,13 @@ RENDERING:
 X add rendering of triangle geometry.
 / accelerate triangle geometry rendering via occtree.
 / approximate the rendering equation.
-- refraction
+/ refraction
     - different wavelengths refract differently.
 - textures for materials.
-- diffuse and specular interaction with surfaces via fresnel equations.
+X diffuse and specular interaction with surfaces via fresnel equations.
 - subsurface scattering.
-- physical camera modelling (e.g. lens).
-    - depth of field
+/ physical camera modelling (e.g. lens).
+    X depth of field
     - exposure
 - accelerate and improve quality with denoising.
 - importance sampling.
@@ -107,13 +154,16 @@ bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, 
     return t!=minHitDistance;
 }
 
-v3 brdf(material_t &mat);
-
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
     
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
-     
-    //v3 attenuation = V3(1, 1, 1);
+    v3 rayOrigin, rayDirection, nextNormal = {};
+
+    v3 radiance = {};
+    if (depth>=MAX_BOUNCE_COUNT) return radiance;
+
+    rayOrigin=o;
+    rayDirection=d;
 
 #if 0
     int tapCount=1,tapIdxStart=0;
@@ -146,249 +196,240 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
     directions[0] = d;
     memset(states, 0xDEADBEEF, sizeof(states));
     //isLive[0]=1;
-#else
-    v3 radiance = {};
-    if (depth>=MAX_BOUNCE_COUNT) return radiance;
-#endif
-    
+
     //for (int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT; ++bounceCount) {
         // NOTE: we use newTapCount idea because rays should only become "live" on the next bounce.
         //int newTapCount=tapCount;
 
 
         //for (int tapIdx=tapIdxStart; tapIdx < tapCount; tapIdx++) {
-            v3 rayOrigin,rayDirection;
 
-#if 0
-            
-            rayOrigin=origins[tapIdx];
+
+    rayOrigin=origins[tapIdx];
             rayDirection=directions[tapIdx];
             //if (!isLive[tapIdx]) continue;
-#else
-            rayOrigin=o;
-            rayDirection=d;
 #endif
 
-            float hitDistance = FLT_MAX;
-            unsigned int hitMatIndex = 0;
-            v3 nextNormal = {};
-            // sphere intersection test.
-            for (
-                unsigned int sphereIndex= 0;
-                sphereIndex < world->sphereCount;
-                sphereIndex++
-            ) {
-                sphere_t sphere = world->spheres[sphereIndex];  
-                v3 sphereRelativeRayOrigin = rayOrigin - sphere.p;
-                float a = Dot(rayDirection, rayDirection);
-                float b = 2.0f * Dot(sphereRelativeRayOrigin, rayDirection);
-                float c = Dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
-                    - sphere.r * sphere.r;
-                float denom = 2.0f * a;
-                float rootTerm = SquareRoot(b * b - 4.0f * a * c);
-                if (rootTerm > tolerance){
-                    // NOTE(Noah): The denominator can never be zero
-                    float tp = (-b + rootTerm) / denom;
-                    float tn = (-b - rootTerm) / denom;   
-                    float t = tp;
-                    if ((tn > minHitDistance) && (tn < tp)){
-                        t = tn;
-                    }
+    float hitDistance = FLT_MAX;
+    unsigned int hitMatIndex = 0;
+
+    // sphere intersection test.
+    for (
+        unsigned int sphereIndex= 0;
+        sphereIndex < world->sphereCount;
+        sphereIndex++
+    ) {
+        sphere_t sphere = world->spheres[sphereIndex];  
+        v3 sphereRelativeRayOrigin = rayOrigin - sphere.p;
+        float a = Dot(rayDirection, rayDirection);
+        float b = 2.0f * Dot(sphereRelativeRayOrigin, rayDirection);
+        float c = Dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
+            - sphere.r * sphere.r;
+        float denom = 2.0f * a;
+        float rootTerm = SquareRoot(b * b - 4.0f * a * c);
+        if (rootTerm > tolerance){
+            // NOTE(Noah): The denominator can never be zero
+            float tp = (-b + rootTerm) / denom;
+            float tn = (-b - rootTerm) / denom;   
+            float t = tp;
+            if ((tn > minHitDistance) && (tn < tp)){
+                t = tn;
+            }
+            if ((t > minHitDistance) && (t < hitDistance)) {
+                hitDistance = t;
+                hitMatIndex = sphere.matIndex;
+                nextNormal = Normalize(t*rayDirection + sphereRelativeRayOrigin);
+            }
+        }
+    }
+
+    // floor intersection test.
+    for (
+        unsigned int planeIndex = 0;
+        planeIndex < world->planeCount;
+        planeIndex++
+    ) {
+        plane_t plane = world->planes[planeIndex];
+        float t=RayIntersectPlane(rayOrigin, rayDirection, plane.n, plane.d, minHitDistance);
+        if ((t > minHitDistance) && (t < hitDistance)) {
+            hitDistance = t;
+            hitMatIndex = plane.matIndex;
+            nextNormal = plane.n;
+        }
+    }
+
+    // intersection test with the triangles in the world (via an acceleration structure).
+    {
+        rtas_node_t &rtas = world->rtas;
+
+        static thread_local  stack_t<rtas_node_t*> nodes={};
+        if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, rtas.bounds))
+            nc_spush(nodes, &rtas);
+
+        mesh_t &mesh = world->meshes[0];
+
+        while(nc_ssize(nodes))
+        {
+            rtas_node_t *r = nc_spop(nodes);
+            if (r->children)
+                for (int i=0;i<nc_sbcount(r->children);i++)
+                {
+                    rtas_node_t *c = &r->children[i];
+                    if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, c->bounds))
+                        nc_spush(nodes, c);
+                }
+            else // leaf
+                for (int i=0;i<r->triangleCount;i++)
+                {
+                    int triIndex = r->triangles[i];
+                    v3 *points = &mesh.points[triIndex*3];
+                    v3 A=points[0];
+                    v3 B=points[1];
+                    v3 C=points[2];
+                    v3 n = Normalize( Cross( B-A, C-A ) );
+                    float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
+                    // hit.
                     if ((t > minHitDistance) && (t < hitDistance)) {
                         hitDistance = t;
-                        hitMatIndex = sphere.matIndex;
-                        nextNormal = Normalize(t*rayDirection + sphereRelativeRayOrigin);
-                    }
-                }
-            }
-            // floor intersection test
-            for (
-                unsigned int planeIndex = 0;
-                planeIndex < world->planeCount;
-                planeIndex++
-            ) {
-                plane_t plane = world->planes[planeIndex];
-                float t=RayIntersectPlane(rayOrigin, rayDirection, plane.n, plane.d, minHitDistance);
-                if ((t > minHitDistance) && (t < hitDistance)) {
-                    hitDistance = t;
-                    hitMatIndex = plane.matIndex;
-                    nextNormal = plane.n;
-                }
-            }
-            // intersection test with the triangles in the world (via an acceleration structure).
-            {
-                rtas_node_t &rtas = world->rtas;
-
-                static thread_local  stack_t<rtas_node_t*> nodes={};
-                if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, rtas.bounds))
-                    nc_spush(nodes, &rtas);
-
-                mesh_t &mesh = world->meshes[0];
-
-                while(nc_ssize(nodes))
-                {
-                    rtas_node_t *r = nc_spop(nodes);
-                    if (r->children)
-                        for (int i=0;i<nc_sbcount(r->children);i++)
-                        {
-                            rtas_node_t *c = &r->children[i];
-                            if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, c->bounds))
-                                nc_spush(nodes, c);
-                        }
-                    else // leaf
-                        for (int i=0;i<r->triangleCount;i++)
-                        {
-                            int triIndex = r->triangles[i];
-                            v3 *points = &mesh.points[triIndex*3];
-                            v3 A=points[0];
-                            v3 B=points[1];
-                            v3 C=points[2];
-                            v3 n = Normalize( Cross( B-A, C-A ) );
-                            float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
-                            // hit.
-                            if ((t > minHitDistance) && (t < hitDistance)) {
-                                hitDistance = t;
-    #if 0
-                                hitMatIndex = r->bounds.matIndex; // debug.
-    #else
-                            hitMatIndex = mesh.matIndices[triIndex*3];
-    #endif
-                                nextNormal = n;
-                            }
-                        }
-                }
-            }
-            // AABB intersection test
-            for (
-                unsigned int aabbIndex = 0;
-                aabbIndex < world->aabbCount;
-                aabbIndex++
-            ) {
-                aabb_t box = world->aabbs[aabbIndex];
-
-                bool exitedEarly;
-                int faceHitIdx;
-                // NOTE: the faceNormals array was copied directly from within doesRayIntersectWithAABB2.
-                // this is some garbage and not clean code. 
-                constexpr v3 faceNormals[] = {
-                    // front, back, left, right, top, bottom.
-                    {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
-                };
-                float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
-
-                // check hit.
-                if ((t > minHitDistance) && (t < hitDistance)) {
-                    hitDistance = t;
-                    hitMatIndex = box.matIndex;
-                    nextNormal = faceNormals[faceHitIdx];
-                }
-            }
-            material_t mat = world->materials[hitMatIndex];
-            if (hitMatIndex) { 
-
-                float ks,kd,cosTheta,NdotL,F0;
-
-                cosTheta=(Dot(nextNormal, rayDirection));
-                cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
-
-                // How much light is transmitted and how much is reflected?
-                // it changes depending on the angle of incidence and the material interface
-                // properties; it also depends if the light is p or s-polarized.
-                //
-                // here, ks is the amount of reflected light and kd is the amount of trasmitted light.
-                //
-                // but alas, because we don't care about being that accurate, we can just use
-                // Schlick's approximation: https://en.wikipedia.org/wiki/Schlick%27s_approximation.
-                F0 = Square((N_AIR-mat.refractionIndex)/(N_AIR+mat.refractionIndex));
-                ks = F0+(1.f-F0)*powf(1.f-fabsf(cosTheta),5.f);
-                kd=1.f-ks;
-                assert(ks>=0.f&&ks<=1.f);
-
 #if 0
-                int bounceCount=RENDER_EQUATION_TAP_COUNT*ks;//for now, let all transmitted light be gobbled up by the object, never to be seen again.
-                if (!bounceCount)bounceCount=1;//don't allow our low tap rate to produce black holes.
+                        hitMatIndex = r->bounds.matIndex; // debug.
 #else
-                int bounceCount = RENDER_EQUATION_TAP_COUNT;
+                    hitMatIndex = mesh.matIndices[triIndex*3];
 #endif
-                rayOrigin = rayOrigin + hitDistance * rayDirection;
-                v3 pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
-
-                // spawn the new rays.
-                for (int i=0;i<bounceCount;i++)
-                {
-                    float ks_local,kd_local;
-                    v3 rayDirBounce,halfVector,N;
-                    N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
-
-                    v3 randomBounce = Normalize(
-                        (N) + V3(
-                            RandomBilateral(),
-                            RandomBilateral(),
-                            RandomBilateral()
-                        )
-                    );
-                    rayDirBounce = Normalize(Lerp(pureBounce, randomBounce, mat.roughness));
-                    
-#if 0
-                    if (bounceCount<MAX_BOUNCE_COUNT-1) { 
-                        origins[newTapCount] = rayOrigin;
-                        directions[newTapCount] = rayDirection;
-                        isLive[newTapCount]=true;
-                        newTapCount++;
-                        NdotL=theta = Dot(nextNormal,rayDirection);
-                        states[tapIdx].theta[i] = theta;
-                        //isLive[tapIdx]=false; // kill the parent ray.
-                    } else {
-                        // since the next ray will not accumulate, accumulation needs to happen here.
+                        nextNormal = n;
                     }
-#else
-                    halfVector =(1.f/Magnitude(rayDirBounce-rayDirection)) * (rayDirBounce-rayDirection);
-                    cosTheta=Dot(halfVector,rayDirBounce);
-
-                    if (Dot(N, rayDirBounce)>0.f) {
-
-                        assert(cosTheta>=0.f);
-
-                        ks_local = F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
-                        kd_local=1.f-ks_local;
-                        assert(ks_local>=0.f&&ks_local<=1.f);
-                        
-                        radiance += (1.f/float(RENDER_EQUATION_TAP_COUNT)) *
-                            Hadamard(RayCast(world,rayOrigin,rayDirBounce,depth+1), kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
-                    }
-#endif
-                } // end for
-
-                // How to think about the refraction ray?
-                // it doesn't really have anything to do with the BRDF.
-                // it's simply where we continue along the same ray path,
-                // but there's a bend in the path along the way (due to the interface).
-                // and we treat the geometry as "participating media", where
-                // there is some absorption when transporting through a translucent
-                // material.
-                
-                // coming up through a transparent surface
-                // with the reflection ray calculated as 'Iout' above.  The blend
-                // should be 'opacity' of the reflected ray and '1-opacity' of the
-                // refracted ray.
-
-                if (mat.alpha < 1.0f) { // not completely opaque
-
-                    v3 refractionDirection;
-                    if (FindRefractionDirection(rayDirection, nextNormal, mat.refractionIndex, refractionDirection))
-                        radiance += kd*(1.f-mat.alpha) * RayCast(world, rayOrigin, refractionDirection, depth);
                 }
-            }
-            radiance += mat.emitColor;
+        }
+    }
             
-            //states[tapIdx].matIdx=hitMatIndex;
+    // AABB intersection test.
+    for (
+        unsigned int aabbIndex = 0;
+        aabbIndex < world->aabbCount;
+        aabbIndex++
+    ) {
+        aabb_t box = world->aabbs[aabbIndex];
+
+        bool exitedEarly;
+        int faceHitIdx;
+        // NOTE: the faceNormals array was copied directly from within doesRayIntersectWithAABB2.
+        // this is some garbage and not clean code. 
+        constexpr v3 faceNormals[] = {
+            // front, back, left, right, top, bottom.
+            {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
+        };
+        float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
+
+        // check hit.
+        if ((t > minHitDistance) && (t < hitDistance)) {
+            hitDistance = t;
+            hitMatIndex = box.matIndex;
+            nextNormal = faceNormals[faceHitIdx];
+        }
+    }
+    
+    material_t mat = world->materials[hitMatIndex];
+    if (hitMatIndex) { 
+
+        float ks,kd,cosTheta,NdotL,F0;
+
+        cosTheta=(Dot(nextNormal, rayDirection));
+        cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
+
+        // How much light is transmitted and how much is reflected?
+        // it changes depending on the angle of incidence and the material interface
+        // properties; it also depends if the light is p or s-polarized.
+        //
+        // here, ks is the amount of reflected light and kd is the amount of trasmitted light.
+        //
+        // but alas, because we don't care about being that accurate, we can just use
+        // Schlick's approximation: https://en.wikipedia.org/wiki/Schlick%27s_approximation.
+        F0 = Square((N_AIR-mat.refractionIndex)/(N_AIR+mat.refractionIndex));
+        ks = F0+(1.f-F0)*powf(1.f-fabsf(cosTheta),5.f);
+        kd=1.f-ks;
+        assert(ks>=0.f&&ks<=1.f);
+
+        int bounceCount = RENDER_EQUATION_TAP_COUNT;
+
+        rayOrigin = rayOrigin + hitDistance * rayDirection;
+        v3 pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
+
+        // spawn the new rays.
+        for (int i=0;i<bounceCount;i++)
+        {
+            float ks_local,kd_local;
+            v3 rayDirBounce,halfVector,N;
+            N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
+
+            v3 randomBounce = Normalize(
+                (N) + V3(
+                    RandomBilateral(),
+                    RandomBilateral(),
+                    RandomBilateral()
+                )
+            );
+            rayDirBounce = Normalize(Lerp(pureBounce, randomBounce, mat.roughness));
+            
+#if 0
+            if (bounceCount<MAX_BOUNCE_COUNT-1) { 
+                origins[newTapCount] = rayOrigin;
+                directions[newTapCount] = rayDirection;
+                isLive[newTapCount]=true;
+                newTapCount++;
+                NdotL=theta = Dot(nextNormal,rayDirection);
+                states[tapIdx].theta[i] = theta;
+                //isLive[tapIdx]=false; // kill the parent ray.
+            } else {
+                // since the next ray will not accumulate, accumulation needs to happen here.
+            }
+#else
+            halfVector =(1.f/Magnitude(rayDirBounce-rayDirection)) * (rayDirBounce-rayDirection);
+            cosTheta=Dot(halfVector,rayDirBounce);
+
+            if (Dot(N, rayDirBounce)>0.f) {
+
+                assert(cosTheta>=0.f);
+
+                ks_local = F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
+                kd_local=1.f-ks_local;
+                assert(ks_local>=0.f&&ks_local<=1.f);
+                
+                radiance += (1.f/float(RENDER_EQUATION_TAP_COUNT)) *
+                    Hadamard(RayCast(world,rayOrigin,rayDirBounce,depth+1), kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
+            }
+#endif
+        } // END FOR.
+
+        // How to think about the refraction ray?
+        // it doesn't really have anything to do with the BRDF.
+        // it's simply where we continue along the same ray path,
+        // but there's a bend in the path along the way (due to the interface).
+        // and we treat the geometry as "participating media", where
+        // there is some absorption when transporting through a translucent
+        // material.
+        
+        // coming up through a transparent surface
+        // with the reflection ray calculated as 'Iout' above.  The blend
+        // should be 'opacity' of the reflected ray and '1-opacity' of the
+        // refracted ray.
+
+        if (mat.alpha < 1.0f) { // not completely opaque
+
+            v3 refractionDirection;
+            if (FindRefractionDirection(rayDirection, nextNormal, mat.refractionIndex, refractionDirection))
+                radiance += kd*(1.f-mat.alpha) * RayCast(world, rayOrigin, refractionDirection, depth);
+        }
+    } // END IF.
+    radiance += mat.emitColor;
+            
+// premature optimization is the root of all evil?
+#if 0
+//states[tapIdx].matIdx=hitMatIndex;
         //}
         //tapIdxStart=tapCount;
         //tapCount=newTapCount;
     //}
 
-// premature optimization is the root of all evil?
-#if 0
     // accumulate the radiance, going backwards through the data.
     // we reduce the tree-structured data as we go through.
     memset(radiances,0,sizeof(radiances));
@@ -421,56 +462,16 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
     }
 #endif
 
-    // divide by tapCount is OK here and agrees with rendering eq due to linearity of integrals.
     return radiance;
 }
-
-#define STATIC_MATERIAL_COUNT 5
-#define DYNAMIC_MATERIAL_MAX_COUNT 10
-constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
-int dynamicMaterialCount;
-
-static world_t world = {};
-// populate word with floor and spheres.
-static material_t materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
-
-void AddDynamicMaterial(material_t mat)
-{
-    assert(dynamicMaterialCount<DYNAMIC_MATERIAL_MAX_COUNT);
-    materials[STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+dynamicMaterialCount++]=mat;
-}
-
-int MaterialsCount()
-{
-    return STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+dynamicMaterialCount;
-}
-
-static plane_t planes[1] = {};
-static sphere_t spheres[4] = {};
-static mesh_t meshes[1]={};
-static aabb_t aabbs[1]={};
-static v3 cameraP = {};
-static v3 cameraZ = {};
-static v3 cameraX = {};
-static v3 cameraY = {};
-static float filmDist = 0.1f;//10cm.
-static float filmW = 0.1f;
-static float filmH = 0.1f;
-static float halfFilmW;
-static float halfFilmH;
-static v3 filmCenter;
-float halfPixW;
-float halfPixH;
-unsigned int raysPerPixel = RAYS_PER_PIXEL;
-image_32_t image = {};
 
 // TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
 // or is this something that we can fix on the engine side?
 void visualizer(game_memory_t *gameMemory) {
-    memcpy((void *)gameMemory->backbufferPixels, image.pixelPointer,
+    memcpy((void *)gameMemory->backbufferPixels, g_image.pixelPointer,
         sizeof(uint32_t) * gameMemory->backbufferWidth * gameMemory->backbufferHeight);
 
-    DWORD result = WaitForSingleObject( masterThreadHandle, 0);
+    DWORD result = WaitForSingleObject( g_masterThreadHandle, 0);
     if (result == WAIT_OBJECT_0) {
 //        setGlobalRunning
         automata_engine::setGlobalRunning(false);// platform::GLOBAL_RUNNING=false;
@@ -478,24 +479,21 @@ void visualizer(game_memory_t *gameMemory) {
     else {
         // the thread handle is not signaled - the thread is still alive
     }
-    
 }
 
-void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw, int nh) { }
+void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw, int nh) { 
+    // nothing to see here, folks.
+}
+
+void automata_engine::Close(game_memory_t *gameMemory) { 
+    // nothing to see here, folks.
+}
+
 void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
     ae::defaultWindowName = "Raytracer";
+
 }
-void automata_engine::Close(game_memory_t *gameMemory) { }
-
-typedef struct texel {
-    int width;
-    int height;
-    uint32_t xPos;
-    uint32_t yPos;
-} texel_t;
-
-constexpr bool use_pinhole=false;
 
 // NOTE(Noah): 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
@@ -514,30 +512,27 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
     texel_t *texels = std::get<0>(*ptr_to_tuple);
     for (uint32_t i = 0; i < std::get<1>(*ptr_to_tuple); i++) {
         texel_t texel = texels[i];
-        unsigned int *out = image.pixelPointer + texel.yPos * image.width + texel.xPos;
+        unsigned int *out = g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
         // Raytracer works by averaging all colors from all rays shot from this pixel.
         for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++) {
-            float filmY = -1.0f + 2.0f * (float)y / (float)image.height;
+            float filmY = -1.0f + 2.0f * (float)y / (float)g_image.height;
             for (unsigned int x = texel.xPos; x < (texel.width + texel.xPos); x++) {
-                float filmX = -1.0f + 2.0f * (float)x / (float)image.width;
+                float filmX = -1.0f + 2.0f * (float)x / (float)g_image.width;
                 v3 color = {};
 
-                if constexpr( use_pinhole ) {
+                if ( use_pinhole ) {
                     float contrib = 1.0f / (float)raysPerPixel;
                     for (unsigned int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) {
-                        float offX = filmX + (RandomBilateral() * halfPixW);
-                        float offY = filmY + (RandomBilateral() * halfPixH);
-                        v3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
-                        v3 rayOrigin = cameraP;
-                        v3 rayDirection = Normalize(filmP - cameraP);
+                        float offX = filmX + (RandomBilateral() * g_halfPixW);
+                        float offY = filmY + (RandomBilateral() * g_halfPixH);
+                        v3 filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
+                        v3 rayOrigin = g_cameraP;
+                        v3 rayDirection = Normalize(filmP - g_cameraP);
                         color = color + contrib * RayCast(&world, rayOrigin, rayDirection,0);
                     }
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
                 {
                     float contrib = 1.0f / (float)raysPerPixel/(float)raysPerPixel;
-                    // here, we use a 35mm=3.5cm camera lens disc.
-                    #define LENS_RADIUS 0.035f // scene units are 1 = 1m.
-                    #define FOCAL_LENGTH 0.098f
 
                     // the poisson disk samples
                     const int NUM_SAMPLES = 12;     // the number of samples to take.
@@ -559,18 +554,18 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
 
                     for (unsigned int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) { // integrate across image sensor.
                         
-                        float offX = filmX + (RandomBilateral() * halfPixW);
-                        float offY = filmY + (RandomBilateral() * halfPixH);
-                        v3 filmP = filmCenter + (offX * halfFilmW * cameraX) + (offY * halfFilmH * cameraY);
-                        v3 rayOrigin = cameraP;
-                        v3 rayDirection = Normalize(cameraP-filmP);
+                        float offX = filmX + (RandomBilateral() * g_halfPixW);
+                        float offY = filmY + (RandomBilateral() * g_halfPixH);
+                        v3 filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
+                        v3 rayOrigin = g_cameraP;
+                        v3 rayDirection = Normalize(g_cameraP-filmP);
 
                         // intersect with focal plane.
                         // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
                         // 1/f = 1/v + 1/b.
-                        float focalPlaneDist = 1.f/(1.f/FOCAL_LENGTH - 1.f/filmDist);
-                        v3 planePoint,N= cameraZ,focalPoint;
-                        planePoint = cameraP + cameraX + focalPlaneDist*N;
+                        float focalPlaneDist = 1.f/(1.f/FOCAL_LENGTH - 1.f/g_filmDist);
+                        v3 planePoint,N= g_cameraZ,focalPoint;
+                        planePoint = g_cameraP + g_cameraX + focalPlaneDist*N;
                         float d = Dot(N,planePoint);
 
                         float t=RayIntersectPlane(rayOrigin, rayDirection, N, d, MIN_HIT_DISTANCE);
@@ -583,7 +578,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
 
                             v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
                             v3 rayOriginDisk,rayDirectionDisk;
-                            rayOriginDisk = rayOrigin + diskSample.x*LENS_RADIUS*cameraX + diskSample.y*LENS_RADIUS*cameraY;
+                            rayOriginDisk = rayOrigin + diskSample.x*LENS_RADIUS*g_cameraX + diskSample.y*LENS_RADIUS*g_cameraY;
                             rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
 
                             color = color + contrib * RayCast(&world, rayOriginDisk, rayDirectionDisk,0);
@@ -601,7 +596,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                 unsigned int BMPValue = BGRAPack4x8(BMPColor);
                 *out++ = BMPValue; // ARGB
             }
-            out += image.width - texel.width;
+            out += g_image.width - texel.width;
         }
         // TODO(Noah): It seems that the thread continues even after we close the window??
         // (we had prints that were showing) it could be the terminal doing a buffering thing,
@@ -611,23 +606,16 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
     ExitThread(0);
 }
 
-// TODO(Noah): There are certainly ways that we can make this Raytracer perform better overall!
-// We can literally shift the entire thing over to execution on the GPU via compute.
-// 
-// Or we can say, "some threads finish all their texels, while others are still working". We are wasting
-// potential good work! we need the master thread to notice and assign those lazy threads more work.
-//
-// Finally, on a per-thread basis, we could introduce SIMD intrinsics / instructions to see if we can get
-// some more throughput there ...
-
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
-    uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(image.width * image.height) / 
+
+    uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * g_image.height) / 
         (float)(PIXELS_PER_TEXEL * THREAD_COUNT));
 #if 0
     PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
 #endif
+
     {
         HANDLE threadHandles[THREAD_COUNT];
         uint32_t xPos = 0;
@@ -645,22 +633,22 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                 texel.yPos = yPos;
                 xPos += THREAD_GROUP_SIZE;
                 bool isPartialTexel = false;
-                if (texel.yPos + texel.height > image.height) {
-                    texel.height -= (texel.yPos + texel.height) - image.height;
+                if (texel.yPos + texel.height > g_image.height) {
+                    texel.height -= (texel.yPos + texel.height) - g_image.height;
                     texel.height = max(texel.height, 0);
                     isPartialTexel = true;
                 }
-                if (xPos >= image.width) {
-                    if (xPos > image.width) {
-                        texel.width -= xPos - image.width;
+                if (xPos >= g_image.width) {
+                    if (xPos > g_image.width) {
+                        texel.width -= xPos - g_image.width;
                         texel.width = max(texel.width, 0);
                         isPartialTexel = true;
                     }
                     xPos = 0;
                     yPos += THREAD_GROUP_SIZE;
                 }
-                if (texel.xPos >= 0 && (texel.xPos + texel.width <= image.width) &&
-                    texel.yPos >= 0 && (texel.yPos + texel.height <= image.height)
+                if (texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.width) &&
+                    texel.yPos >= 0 && (texel.yPos + texel.height <= g_image.height)
                 ) {
                     if (isPartialTexel) j--; // NOTE(Noah): This is hack ...
                     StretchyBufferPush(texels, texel);
@@ -696,8 +684,10 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
         }
         StretchyBufferFree(texels);
     }
+
+#undef PIXELS_PER_TEXEL
     
-    WriteImage(image, "test.bmp");    
+    WriteImage(g_image, "test.bmp");
     printf("Done. Image written to test.bmp\n");
     ExitThread(0);
 }
@@ -705,109 +695,103 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 void automata_engine::Init(game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
-    image = AllocateImage(winInfo.width, winInfo.height);    
-    materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
-    materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
-    materials[1].roughness = 1.f;
-    materials[1].refractionIndex=1.f; // amber.
-    //materials[1].emitColor = V3(0.3f, 0.0f, 0.0f);
-    materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
-    materials[2].roughness = 1.f;
-    materials[2].refractionIndex=2.417f; // diamond.
-    materials[2].alpha=0.0f; // diamond.
-    materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
-    materials[3].roughness = 0.0f;
-    materials[3].refractionIndex=1.31f; // ice.    
-    materials[4].albedo = V3(0.3f, 0.25f, 0.7f);
-    materials[4].roughness = 1.f;
-    materials[4].refractionIndex=1.544f; // fused silica; a pure form of glass.    
-    { // generate debug materials for occtree voxels.
+    g_image = AllocateImage(winInfo.width, winInfo.height);    
+    g_materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
+    g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
+    g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
+    g_materials[2].refractionIndex=2.417f; // diamond.
+    g_materials[2].alpha=0.0f; // diamond.
+    g_materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
+    g_materials[3].roughness = 0.0f;
+    g_materials[3].refractionIndex=1.31f; // ice.    
+    g_materials[4].albedo = V3(0.3f, 0.25f, 0.7f);
+    g_materials[4].refractionIndex=1.544f; // fused silica; a pure form of glass.    
+    { // generate debug g_materials for occtree voxels.
         int s=1<<LEVELS;
         for (int i=0;i<s;i++)
         for (int j=0;j<s;j++)
         for (int k=0;k<s;k++)
         {
-            materials[5 + i * s * s + j * s + k].albedo = V3( s/(float)i,s/(float)j,s/(float)k );
-            materials[5 + i * s * s + j * s + k].roughness=1.f;
-            materials[5 + i * s * s + j * s + k].refractionIndex=1.f;
+            g_materials[5 + i * s * s + j * s + k].albedo = V3( s/(float)i,s/(float)j,s/(float)k );
+            g_materials[5 + i * s * s + j * s + k].roughness=1.f;
+            g_materials[5 + i * s * s + j * s + k].refractionIndex=1.f;
         }
     }
-    planes[0].n = V3(0,0,1);
-    planes[0].d = 0; // plane on origin
-    planes[0].matIndex = 1;
-    spheres[0].p = V3(0,0,0);
-    spheres[0].r = 1.0f;
-    spheres[0].matIndex = 2;
-    spheres[1].p = V3(-1,-5,0);
-    spheres[1].r = 1.0f;
-    spheres[1].matIndex = 4;
-    spheres[2].p = V3(-2,0,2);
-    spheres[2].r = 1.0f;
-    spheres[2].matIndex = 3;
-    spheres[3].p = V3(1,-7,0);
-    spheres[3].r = 1.0f;
-    spheres[3].matIndex = 3;
-    aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
-    aabbs[0].matIndex = 4;
-    meshes[0].points=nullptr;
+    g_planes[0].n = V3(0,0,1);
+    g_planes[0].d = 0; // plane on origin
+    g_planes[0].matIndex = 1;
+    g_spheres[0].p = V3(0,0,0);
+    g_spheres[0].r = 1.0f;
+    g_spheres[0].matIndex = 2;
+    g_spheres[1].p = V3(-1,-5,0);
+    g_spheres[1].r = 1.0f;
+    g_spheres[1].matIndex = 4;
+    g_spheres[2].p = V3(-2,0,2);
+    g_spheres[2].r = 1.0f;
+    g_spheres[2].matIndex = 3;
+    g_spheres[3].p = V3(1,-7,0);
+    g_spheres[3].r = 1.0f;
+    g_spheres[3].matIndex = 3;
+    g_aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
+    g_aabbs[0].matIndex = 4;
+    g_meshes[0].points=nullptr;
     // load gltf scene.
     LoadGltf();
-    meshes[0].pointCount = nc_sbcount(meshes[0].points);
+    g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
     world.materialCount = (unsigned int)MaterialsCount();
-    world.materials = materials;
-    world.planeCount = ARRAY_COUNT(planes);
-    world.planes = planes;
-    world.sphereCount = ARRAY_COUNT(spheres);
-    world.spheres = spheres;
-    //world.aabbCount = ARRAY_COUNT(aabbs);
-    world.aabbs = aabbs;
-    world.meshCount = ARRAY_COUNT(meshes);
-    world.meshes = meshes;
+    world.materials = g_materials;
+    world.planeCount = ARRAY_COUNT(g_planes);
+    world.planes = g_planes;
+    world.sphereCount = ARRAY_COUNT(g_spheres);
+    world.spheres = g_spheres;
+    //world.aabbCount = ARRAY_COUNT(g_aabbs);
+    world.aabbs = g_aabbs;
+    world.meshCount = ARRAY_COUNT(g_meshes);
+    world.meshes = g_meshes;
     world.rtas = GenerateAccelerationStructure(&world);
     // define camera and characteristics
-    cameraP = V3(0, -10, 1); //  /* go back 10 and up 1 */ : V3(0, 10, 1); /* look down negative Z for physical camera */ 
-    cameraZ = (use_pinhole)? Normalize(cameraP) : -Normalize(cameraP);
-    cameraX = Normalize(Cross(V3(0,0,1), cameraZ));
-    cameraY = Normalize(Cross(cameraZ, cameraX));
-    if (image.width > image.height) {
-        filmH = filmW * (float)image.height / (float)image.width;
-    } else if (image.height > image.width) {
-        filmW = filmH * (float)image.width / (float)image.height;
+    g_cameraP = V3(0, -10, 1); //  /* go back 10 and up 1 */ : V3(0, 10, 1); /* look down negative Z for physical camera */ 
+    g_cameraZ = (use_pinhole)? Normalize(g_cameraP) : -Normalize(g_cameraP);
+    g_cameraX = Normalize(Cross(V3(0,0,1), g_cameraZ));
+    g_cameraY = Normalize(Cross(g_cameraZ, g_cameraX));
+    if (g_image.width > g_image.height) {
+        g_filmH = g_filmW * (float)g_image.height / (float)g_image.width;
+    } else if (g_image.height > g_image.width) {
+        g_filmW = g_filmH * (float)g_image.width / (float)g_image.height;
     }
     if (!use_pinhole)
-        filmDist=1.f/(1.f/FOCAL_LENGTH-1.f/IMAGE_FOCAL_LENGTH);
-    halfFilmW = filmW / 2.0f;
-    halfFilmH = filmH / 2.0f;
-    filmCenter = cameraP - filmDist * cameraZ;
-    halfPixW = 1.0f / image.width;
-    halfPixH = 1.0f / image.height;
+        g_filmDist=1.f/(1.f/FOCAL_LENGTH-1.f/IMAGE_FOCAL_LENGTH);
+    g_halfFilmW = g_filmW / 2.0f;
+    g_halfFilmH = g_filmH / 2.0f;
+    g_filmCenter = g_cameraP - g_filmDist * g_cameraZ;
+    g_halfPixW = 1.0f / g_image.width;
+    g_halfPixH = 1.0f / g_image.height;
     // print infos.
     {
-        PlatformLoggerLog("camera located at (%f,%f,%f)\n", cameraP.x,cameraP.y,cameraP.z);
-        PlatformLoggerLog("cameraX: (%f,%f,%f)\n", cameraX.x,cameraX.y,cameraX.z);
-        PlatformLoggerLog("cameraY: (%f,%f,%f)\n", cameraY.x,cameraY.y,cameraY.z);
-        PlatformLoggerLog("cameraZ: (%f,%f,%f)\n", cameraZ.x,cameraZ.y,cameraZ.z);
+        PlatformLoggerLog("camera located at (%f,%f,%f)\n", g_cameraP.x,g_cameraP.y,g_cameraP.z);
+        PlatformLoggerLog("g_cameraX: (%f,%f,%f)\n", g_cameraX.x,g_cameraX.y,g_cameraX.z);
+        PlatformLoggerLog("g_cameraY: (%f,%f,%f)\n", g_cameraY.x,g_cameraY.y,g_cameraY.z);
+        PlatformLoggerLog("g_cameraZ: (%f,%f,%f)\n", g_cameraZ.x,g_cameraZ.y,g_cameraZ.z);
         PlatformLoggerLog(
-            "cameraX and Y define the plane where the image plane is embedded.\n"
-            "rays are shot originating from the cameraP and through the image plane(i.e. each pixel).\n"
+            "g_cameraX and Y define the plane where the image plane is embedded.\n"
+            "rays are shot originating from the g_cameraP and through the image plane(i.e. each pixel).\n"
             "the camera has a local coordinate system which is different from the world coordinate system.\n");
     }
     automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
-    masterThreadHandle=CreateThread(
+    g_masterThreadHandle=CreateThread(
         nullptr,
         0, // default stack size.
         master_thread,
         nullptr,
         0, // thread runs immediately after creation.
         nullptr
-    );    
+    );
 }
-
-void AdoptChildren(rtas_node_t &node, rtas_node_t B);
 
 rtas_node_t GenerateAccelerationStructure(world_t *world)
 {
     rtas_node_t accel;
+    void AdoptChildren(rtas_node_t &node, rtas_node_t B);
 
     float sep = WORLD_SIZE / float(1<<LEVELS);
     int leavesCount, nodesCount, halfLeavesCount;
@@ -921,7 +905,19 @@ rtas_node_t GenerateAccelerationStructure(world_t *world)
                                                                a not so sloppy joe after all: take the above and relate it to precise raymarch.
                                                                when iter, "whichever is shorter". based on slope. the gradient of the plane is
                                                                thus what we care about, that's a v3.
-                                                                   
+
+
+                // helper function to make it a single line.
+                bool FiniteLineIntersectsWithAABB(v3 A, v3 B, float minHitDistance, aabb_t box)
+                {
+                    v3 dir = B-A;
+                    float len=Magnitude(dir);
+                    bool exitedEarly;
+                    int faceHitIdx;
+                    float t=doesRayIntersectWithAABB2(A, B, minHitDistance, box, &exitedEarly, &faceHitIdx);
+                    return t!=minHitDistance && t <= len;
+                }
+
                 */
                 //bool FiniteLineIntersectsWithAABB(v3 A, v3 B, float minHitDistance, aabb_t box);
                 
@@ -1101,14 +1097,12 @@ void LoadGltf()
                             cgltf_material *mat = prim.material;
                             int matIdx=1;
                             if (mat->has_pbr_metallic_roughness) {
-                                cgltf_pbr_metallic_roughness *metalrough = &mat->pbr_metallic_roughness;//.base_color_factor[4];//cgltf_float
+                                cgltf_pbr_metallic_roughness *metalrough = &mat->pbr_metallic_roughness;
                                 if (metalrough->base_color_texture.texture == NULL) {//support textureless materials.
                                     material_t Mat={};
-                                    Mat.roughness=1.f;
                                     Mat.albedo.x=metalrough->base_color_factor[0];
                                     Mat.albedo.y=metalrough->base_color_factor[1];
                                     Mat.albedo.z=metalrough->base_color_factor[2];
-                                    Mat.refractionIndex=2.417f;//diamond.
                                     AddDynamicMaterial(Mat);// NOTE: we don't care about duplicates.
                                     matIdx = MaterialsCount() - 1;
                                 }
@@ -1155,12 +1149,12 @@ void LoadGltf()
                                     v3 v2 = { posData[b],posData[b + 1],posData[b + 2] };
                                     v3 v3 = { posData[c],posData[c + 1],posData[c + 2]};
 
-                                    nc_sbpush(meshes[0].points, v1);
-                                    nc_sbpush(meshes[0].points, v2);
-                                    nc_sbpush(meshes[0].points, v3);
-                                    nc_sbpush(meshes[0].matIndices, matIdx);
-                                    nc_sbpush(meshes[0].matIndices, matIdx);
-                                    nc_sbpush(meshes[0].matIndices, matIdx);
+                                    nc_sbpush(g_meshes[0].points, v1);
+                                    nc_sbpush(g_meshes[0].points, v2);
+                                    nc_sbpush(g_meshes[0].points, v3);
+                                    nc_sbpush(g_meshes[0].matIndices, matIdx);
+                                    nc_sbpush(g_meshes[0].matIndices, matIdx);
+                                    nc_sbpush(g_meshes[0].matIndices, matIdx);
                                 }
 
                                 free(indexData);
@@ -1169,8 +1163,8 @@ void LoadGltf()
                                 for (int j = 0;j < float_count;j += 3)
                                 {
                                     v3 v = { posData[j],posData[j+1],posData[j+2] };
-                                    nc_sbpush(meshes[0].points, v);
-                                    nc_sbpush(meshes[0].matIndices, matIdx);
+                                    nc_sbpush(g_meshes[0].points, v);
+                                    nc_sbpush(g_meshes[0].matIndices, matIdx);
                                 }
                             }
 
@@ -1203,14 +1197,11 @@ v3 brdf(material_t &mat)
     return V3(1.f,1.f,1.f);
 }
 
-// Find the refraction direction of a ray that is *arriving* in
-// direction 'rayDir' at an air/glass interface with outward-pointing
-// normal 'N'.  If the ray is entering the surface, assume an
-// air-to-glass transition.  Otherwise, assume a glass-to-air
-// transition.  Use Snell's Law and the indices of refraction of glass
-// and air to set 'refractionDir'.
+// Finds the refraction direction of a ray that is *arriving* in
+// direction 'rayDir' at an air/"nglass" interface with outward-pointing
+// normal 'N'.
 //
-// Return true if a value is returned in 'refractionDir'.  Return
+// Returns true if a value is returned in 'refractionDir'.  Returns
 // false if there's total internal reflection (hence, no refraction).
 bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir )
 {

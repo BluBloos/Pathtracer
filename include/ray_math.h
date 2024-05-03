@@ -268,7 +268,7 @@ static float RayIntersectPlane(v3 rayOrigin, v3 rayDirection, v3 N, float d, flo
     return minHit;
 }
 
-static float Square(float a){
+static float Square(float a) {
     return a*a;
 }
 
@@ -278,7 +278,7 @@ static float RayIntersectTri(v3 rayOrigin, v3 rayDirection, float minHit, v3 &A,
     // Compute the barycentric coordinates of the plane point.
     // check that they all add to 1 and are all positive, if so, we're in the triangle.
 
-        float d = Dot(A, N);
+    float d = Dot(A, N);
 
     float t=RayIntersectPlane(rayOrigin,rayDirection,N,d, minHit);
     if(t!=minHit) {

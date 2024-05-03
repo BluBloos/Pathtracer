@@ -103,6 +103,13 @@ struct rtas_node_t
     aabb_t bounds;
 };
 
+typedef struct texel {
+    int width;
+    int height;
+    unsigned int xPos;
+    unsigned int yPos;
+} texel_t;
+
 typedef struct world {
     unsigned int materialCount;
     material *materials;
