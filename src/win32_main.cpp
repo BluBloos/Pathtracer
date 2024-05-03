@@ -12,7 +12,7 @@
 #include "nc_ds.h"
 
 #define MAX_BOUNCE_COUNT 4
-#define THREAD_COUNT 16
+#define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
 #define RAYS_PER_PIXEL 4              // for antialiasing.
 #define RENDER_EQUATION_TAP_COUNT 8
@@ -71,13 +71,21 @@ float g_halfPixW;
 float g_halfPixH;
 constexpr unsigned int raysPerPixel = RAYS_PER_PIXEL;
 image_32_t g_image = {};
+
 static HANDLE g_masterThreadHandle;
+static int g_tc; // thread count.
+
+// https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
+extern int __argc;
+extern char ** __argv;
 
 /*
 TODO:
 APPLICATION:
-- render proper orientation at runtime.
-- add cmdline processing.
+X render proper orientation at runtime.
+- save proper orientation.
+X Add cmdline processing.
+    X thread count.
 PERFORMANCE:
 - Use compute shaders.
 - "Some threads finish all their texels, while others are still working" - we are wasting potential good work!
@@ -493,6 +501,21 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
     ae::defaultWindowName = "Raytracer";
 
+    g_tc=MAX_THREAD_COUNT;
+
+    // process cmdline args.
+    for( char **argv=__argv; *argv; argv++ )
+        if ( *argv[0]=='-' )
+            for( char c; c=*((argv[0])++); ) {
+                switch( c ) {
+                    case 't':
+                        g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
+                        break;
+                    default:
+                        // nothing to see here, folks.
+                        break;
+                }
+            }
 }
 
 // NOTE(Noah): 
@@ -611,20 +634,20 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
 
     uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * g_image.height) / 
-        (float)(PIXELS_PER_TEXEL * THREAD_COUNT));
+        (float)(PIXELS_PER_TEXEL * g_tc));
 #if 0
     PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
 #endif
 
     {
-        HANDLE threadHandles[THREAD_COUNT];
+        HANDLE threadHandles[MAX_THREAD_COUNT];
         uint32_t xPos = 0;
         uint32_t yPos = 0;
         // TODO(Noah): Could do entire image as BSP tree -> assign threads to these regions.
         // then break up these regions into texels.
         texel_t *texels = nullptr;
-        std::tuple<texel_t *, uint32_t> texelParams[THREAD_COUNT];
-        for (uint32_t i = 0; i < THREAD_COUNT; i++) {
+        std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
+        for (uint32_t i = 0; i < g_tc; i++) {
             for (uint32_t j = 0; j < maxTexelsPerThread; j++) {
                 texel_t texel;
                 texel.width = THREAD_GROUP_SIZE;
@@ -663,11 +686,11 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
         }
         // NOTE(Noah): The reason we split up the for-loop is because texels base addr
         // is not stable until we have finished pushing (this is due to stretchy buff logic).
-        for (uint32_t i = 0; i < THREAD_COUNT; i++) {
+        for (uint32_t i = 0; i < g_tc; i++) {
             texelParams[i] = std::make_tuple(
                 texels + i * maxTexelsPerThread,
-                (i + 1 < THREAD_COUNT) ? maxTexelsPerThread :
-                StretchyBufferCount(texels) - (THREAD_COUNT - 1) * maxTexelsPerThread
+                (i + 1 < g_tc) ? maxTexelsPerThread :
+                StretchyBufferCount(texels) - (g_tc - 1) * maxTexelsPerThread
             );
             threadHandles[i] = CreateThread(
                 nullptr,
@@ -679,7 +702,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
             );
         }
         // wait for all threads to complete.
-        for (uint32_t i = 0; i < THREAD_COUNT; i++) {
+        for (uint32_t i = 0; i < g_tc; i++) {
             WaitForSingleObject(threadHandles[i], INFINITE);
         }
         StretchyBufferFree(texels);
