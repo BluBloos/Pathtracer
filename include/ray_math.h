@@ -1,6 +1,8 @@
 #include <math.h>
 #include <float.h>
 #include <assert.h>
+#include <algorithm>
+
 #define PI 3.14159265358979323846264338327f
 #define TOLERANCE float(1e-9)
 
@@ -218,6 +220,11 @@ inline v3 Hadamard(v3 a, v3 b) {
     return newvec3;
 }
 
+inline v3 HadamardDiv(v3 a, v3 b) {
+    v3 newvec3 = {a.x / b.x, a.y / b.y, a.z / b.z};
+    return newvec3;
+}
+
 // TODO(Noah): replcae this with better entropy later
 // return a random value from [0.0, 1.0]
 inline float RandomUnilateral() {
@@ -229,6 +236,14 @@ inline float RandomUnilateral() {
 inline float RandomBilateral() {
     float result = 2.0f * RandomUnilateral() - 1.0f;
     return result;
+}
+
+inline v3 Clamp(v3 v, v3 Min, v3 Max) {
+    return V3( 
+        std::max(Min.x,std::min(v.x,Max.x)),
+        std::max(Min.y,std::min(v.y,Max.y)),
+        std::max(Min.z,std::min(v.z,Max.z))
+    );
 }
 
 inline v3 Lerp(v3 a, v3 b, float p) {

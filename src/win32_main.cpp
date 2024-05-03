@@ -27,6 +27,8 @@
 #define LENS_RADIUS 0.035f // scene units are 1 = 1m.
 #define FOCAL_LENGTH 0.098f
 
+static v3 TonemapPass(v3 pixel);
+
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
 static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
 void visualizer(game_memory_t *gameMemory);
@@ -44,7 +46,7 @@ constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
 static int g_dynamicMaterialCount;
 static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
 static plane_t g_planes[1] = {};
-static sphere_t g_spheres[4] = {};
+static sphere_t g_spheres[3] = {};
 static mesh_t g_meshes[1]={};
 static aabb_t g_aabbs[1]={};
 
@@ -93,7 +95,8 @@ X render proper orientation at runtime.
 - usage/help print if supply -h.
 - use stb_image_write to support .PNG and .JPG.
 RENDERING FEATURES:
-- tonemapping from HDR to 0->1 range.
+/ tonemapping from HDR to 0->1 range.
+    - do more than a cursory read of https://64.github.io/tonemapping/ and integrate real camera response.
 / add light sources: directional, point, area.
     X directional.
     - point.
@@ -307,6 +310,8 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
 }
 
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
+
+    float Schlick(float F0, float cosTheta);
     
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
     v3 rayOrigin, rayDirection;
@@ -389,17 +394,20 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
         kd=1.f-ks;
         assert(ks>=0.f&&ks<=1.f);
 
-        int bounceCount = RENDER_EQUATION_TAP_COUNT;
+        int tapCount = RENDER_EQUATION_TAP_COUNT;
+        float tapContrib = 1.f / float(tapCount + world->lightCount);
 
         rayOrigin = rayOrigin + hitDistance * rayDirection;
         v3 pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
 
+        float ks_local,kd_local;
+        v3 halfVector,N;
+        N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
+
         // spawn the new rays.
-        for (int i=0;i<bounceCount;i++)
+        for (int i=0;i<tapCount;i++)
         {
-            float ks_local,kd_local;
-            v3 rayDirBounce,halfVector,N;
-            N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
+            v3 rayDirBounce;
 
             v3 randomBounce = Normalize(
                 (N) + V3(
@@ -429,12 +437,11 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
             if (Dot(N, rayDirBounce)>0.f) {
 
                 assert(cosTheta>=0.f);
-
-                ks_local = F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
+                ks_local = Schlick(F0,cosTheta);
                 kd_local=1.f-ks_local;
                 assert(ks_local>=0.f&&ks_local<=1.f);
                 
-                radiance += (1.f/float(RENDER_EQUATION_TAP_COUNT)) *
+                radiance += tapContrib *
                     Hadamard(RayCast(world,rayOrigin,rayDirBounce,depth+1), kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
             }
 #endif
@@ -467,9 +474,20 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                 case LIGHT_KIND_DIRECTIONAL:
                 {
                     v3 lightDir=-1.f*light.direction;
-                    auto payload=RayCastIntersect(world,rayOrigin,lightDir);
-                    if (payload.hitMatIndex==0) {
-                        radiance += light.radiance;
+
+                    halfVector =(1.f/Magnitude(lightDir-rayDirection)) * (lightDir-rayDirection);
+                    cosTheta=Dot(halfVector,lightDir);
+
+                    if (Dot(N, lightDir)>0.f) {
+                        assert(cosTheta>=0.f);
+                        ks_local = Schlick(F0,cosTheta);
+                        kd_local=1.f-ks_local;
+                        assert(ks_local>=0.f&&ks_local<=1.f);
+
+                        auto payload=RayCastIntersect(world,rayOrigin,lightDir);
+                        if (payload.hitMatIndex==0) {
+                            radiance += tapContrib * Hadamard(light.radiance, kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
+                        }
                     }
                 } break;
                 case LIGHT_KIND_POINT:
@@ -524,6 +542,10 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
 #endif
 
     return radiance;
+}
+
+float Schlick(float F0, float cosTheta) {
+    return F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
 }
 
 // TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
@@ -658,10 +680,11 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
 
                             color = color + contrib * RayCast(&g_world, rayOriginDisk, rayDirectionDisk,0);
-                            
                         }
                     }
                 }
+
+                color=TonemapPass(color);
 
                 v4 BMPColor = {
                     255.0f * LinearToSRGB(color.r),
@@ -774,10 +797,12 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
     
+    g_materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
+
     g_lights[0].kind = LIGHT_KIND_DIRECTIONAL;
     g_lights[0].direction = Normalize(V3(1.f,-1.f,-1.f));
-    g_lights[0].radiance = V3(1.f,1.f,1.f);
-    g_materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
+    g_lights[0].radiance = 3.f *g_materials[0].emitColor;
+
     g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
     g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
     g_materials[2].refractionIndex=2.417f; // diamond.
@@ -810,9 +835,6 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     g_spheres[2].p = V3(-2,0,2);
     g_spheres[2].r = 1.0f;
     g_spheres[2].matIndex = 3;
-    g_spheres[3].p = V3(1,-7,0);
-    g_spheres[3].r = 1.0f;
-    g_spheres[3].matIndex = 3;
     g_aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
     g_aabbs[0].matIndex = 4;
     g_meshes[0].points=nullptr;
@@ -1318,4 +1340,16 @@ bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refracti
     refractionDir = cos(theta2) * N + LHS * M;
 
     return true;
+}
+
+// ACES,approximation by Krzysztof Narkowicz.
+static v3 TonemapPass(v3 color) {    
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.4f;
+    color = Clamp( HadamardDiv( Hadamard(color, a*color + V3(b,b,b)) , V3(e,e,e) + Hadamard(color,c*color+V3(d,d,d)) ), 
+        V3(0.0f, 0.0f, 0.0f), V3(1.0f, 1.0f, 1.0f));
+    return color;
 }
