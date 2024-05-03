@@ -119,7 +119,7 @@ typedef struct {
     light_kind_t kind;
     union {
         v3 direction;//directional light.
-        v3 location;//point light.
+        v3 position;//point light.
     };
     v3 radiance;
 } light_t;

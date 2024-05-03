@@ -41,7 +41,7 @@ v3 brdf(material_t &mat);
 
 constexpr bool use_pinhole=false;
 static world_t g_world = {};
-static light_t g_lights[1]={};
+static light_t g_lights[2]={};
 constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
 static int g_dynamicMaterialCount;
 static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
@@ -470,30 +470,36 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
         // cast the shadow ray(s).
         for (unsigned int i=0;i<world->lightCount;i++) {
             light_t &light=world->lights[i];
+            float hitThreshold=FLT_MAX,attenuation=1.f;
+            v3 lightDir;
             switch(light.kind){
                 case LIGHT_KIND_DIRECTIONAL:
                 {
-                    v3 lightDir=-1.f*light.direction;
-
-                    halfVector =(1.f/Magnitude(lightDir-rayDirection)) * (lightDir-rayDirection);
-                    cosTheta=Dot(halfVector,lightDir);
-
-                    if (Dot(N, lightDir)>0.f) {
-                        assert(cosTheta>=0.f);
-                        ks_local = Schlick(F0,cosTheta);
-                        kd_local=1.f-ks_local;
-                        assert(ks_local>=0.f&&ks_local<=1.f);
-
-                        auto payload=RayCastIntersect(world,rayOrigin,lightDir);
-                        if (payload.hitMatIndex==0) {
-                            radiance += tapContrib * Hadamard(light.radiance, kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
-                        }
-                    }
+                    lightDir=-1.f*light.direction;
                 } break;
                 case LIGHT_KIND_POINT:
-                break;
+                {
+                    lightDir=light.position-rayOrigin;
+                    hitThreshold=Magnitude(lightDir);
+                    lightDir=(1.f/hitThreshold)*lightDir;//normalize.
+                    attenuation=powf(2.7f,-0.1f*hitThreshold);
+                } break;
                 case LIGHT_KIND_TRIANGLE:
                 break;
+            }
+            halfVector =(1.f/Magnitude(lightDir-rayDirection)) * (lightDir-rayDirection);
+            cosTheta=Dot(halfVector,lightDir);
+
+            if (Dot(N, lightDir)>0.f && attenuation>0.f) {
+                assert(cosTheta>=0.f);
+                ks_local = Schlick(F0,cosTheta);
+                kd_local=1.f-ks_local;
+                assert(ks_local>=0.f&&ks_local<=1.f);
+
+                auto payload=RayCastIntersect(world,rayOrigin,lightDir);
+                if (payload.hitMatIndex==0 || (payload.hitDistance>hitThreshold&&payload.hitDistance>minHitDistance) ) {
+                    radiance += tapContrib * Hadamard( attenuation*light.radiance, kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
+                }
             }
         }
 
@@ -823,6 +829,11 @@ void automata_engine::Init(game_memory_t *gameMemory) {
             g_materials[5 + i * s * s + j * s + k].refractionIndex=1.f;
         }
     }
+
+    g_lights[1].kind = LIGHT_KIND_POINT;
+    g_lights[1].position = V3(2,-5,2);
+    g_lights[1].radiance = 3.f *V3(0.0f, 0.8f, 0.0f);
+
     g_planes[0].n = V3(0,0,1);
     g_planes[0].d = 0; // plane on origin
     g_planes[0].matIndex = 1;
