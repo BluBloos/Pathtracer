@@ -110,7 +110,7 @@ typedef struct texel {
     unsigned int yPos;
 } texel_t;
 
-typedef struct world {
+typedef struct {
     unsigned int materialCount;
     material *materials;
     unsigned int planeCount;

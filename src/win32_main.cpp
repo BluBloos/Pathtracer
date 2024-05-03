@@ -37,7 +37,7 @@ bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refracti
 v3 brdf(material_t &mat);
 
 constexpr bool use_pinhole=false;
-static world_t world = {};
+static world_t g_world = {};
 constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
 static int g_dynamicMaterialCount;
 static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
@@ -131,8 +131,11 @@ static image_32_t AllocateImage(unsigned int width, unsigned int height) {
     return newImage;
 }
 
-static void WriteImage(image_32_t image, char *fileName) {
+static void WriteImage(image_32_t image, char *fileName, bool bFlip=false) {
+    void *pixels;
     unsigned int outputPixelSize = GetTotalPixelSize(image);
+    pixels = malloc(outputPixelSize);
+    if (pixels==NULL) { fprintf(stderr, "[ERROR] Unable to write output file,malloc error.\n");return; }
     bitmap_header_t header = {};
     header.FileType = 0x4D42;   
     header.FileSize = sizeof(bitmap_header_t) + outputPixelSize;
@@ -145,11 +148,15 @@ static void WriteImage(image_32_t image, char *fileName) {
     FILE *fileHandle = fopen("test.bmp", "wb");
     if(fileHandle) {
         fwrite(&header, sizeof(header), 1, fileHandle);
-        fwrite(image.pixelPointer, outputPixelSize, 1, fileHandle);
+        if (bFlip) {
+            for ( unsigned int *pi=image.pixelPointer+image.width*image.height-1, *pp=(unsigned int*)pixels;pi>=image.pixelPointer; )
+                *pp++=*pi--;
+            fwrite(pixels, outputPixelSize, 1, fileHandle);
+        } else fwrite(image.pixelPointer, outputPixelSize, 1, fileHandle);
         fclose(fileHandle);
     }
     else {
-        fprintf(stderr, "[ERROR] Unable to write output file\n");
+        fprintf(stderr, "[ERROR] Unable to write output file,fopen error\n");
     }
 }
 
@@ -551,7 +558,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                         v3 filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
                         v3 rayOrigin = g_cameraP;
                         v3 rayDirection = Normalize(filmP - g_cameraP);
-                        color = color + contrib * RayCast(&world, rayOrigin, rayDirection,0);
+                        color = color + contrib * RayCast(&g_world, rayOrigin, rayDirection,0);
                     }
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
                 {
@@ -604,7 +611,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             rayOriginDisk = rayOrigin + diskSample.x*LENS_RADIUS*g_cameraX + diskSample.y*LENS_RADIUS*g_cameraY;
                             rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
 
-                            color = color + contrib * RayCast(&world, rayOriginDisk, rayDirectionDisk,0);
+                            color = color + contrib * RayCast(&g_world, rayOriginDisk, rayDirectionDisk,0);
                             
                         }
                     }
@@ -710,7 +717,8 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
 
 #undef PIXELS_PER_TEXEL
     
-    WriteImage(g_image, "test.bmp");
+    bool bFlip=true;
+    WriteImage(g_image, "test.bmp",bFlip);
     printf("Done. Image written to test.bmp\n");
     ExitThread(0);
 }
@@ -723,7 +731,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
     g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
     g_materials[2].refractionIndex=2.417f; // diamond.
-    g_materials[2].alpha=0.0f; // diamond.
+    //g_materials[2].alpha=0.0f; // diamond.
     g_materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
     g_materials[3].roughness = 0.0f;
     g_materials[3].refractionIndex=1.31f; // ice.    
@@ -759,19 +767,19 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     g_aabbs[0].matIndex = 4;
     g_meshes[0].points=nullptr;
     // load gltf scene.
-    LoadGltf();
+    //LoadGltf();
     g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
-    world.materialCount = (unsigned int)MaterialsCount();
-    world.materials = g_materials;
-    world.planeCount = ARRAY_COUNT(g_planes);
-    world.planes = g_planes;
-    world.sphereCount = ARRAY_COUNT(g_spheres);
-    world.spheres = g_spheres;
-    //world.aabbCount = ARRAY_COUNT(g_aabbs);
-    world.aabbs = g_aabbs;
-    world.meshCount = ARRAY_COUNT(g_meshes);
-    world.meshes = g_meshes;
-    world.rtas = GenerateAccelerationStructure(&world);
+    g_world.materialCount = (unsigned int)MaterialsCount();
+    g_world.materials = g_materials;
+    g_world.planeCount = ARRAY_COUNT(g_planes);
+    g_world.planes = g_planes;
+    g_world.sphereCount = ARRAY_COUNT(g_spheres);
+    g_world.spheres = g_spheres;
+    //g_world.aabbCount = ARRAY_COUNT(g_aabbs);
+    g_world.aabbs = g_aabbs;
+    g_world.meshCount = ARRAY_COUNT(g_meshes);
+    g_world.meshes = g_meshes;
+    g_world.rtas = GenerateAccelerationStructure(&g_world);
     // define camera and characteristics
     g_cameraP = V3(0, -10, 1); //  /* go back 10 and up 1 */ : V3(0, 10, 1); /* look down negative Z for physical camera */ 
     g_cameraZ = (use_pinhole)? Normalize(g_cameraP) : -Normalize(g_cameraP);
