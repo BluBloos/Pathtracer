@@ -92,7 +92,7 @@ typedef struct {
 typedef struct {
     v3 *points;
     int *matIndices;
-    unsigned int pointCount;    
+    unsigned int pointCount;
 } mesh_t;
 
 typedef struct rtas_node {
@@ -129,6 +129,11 @@ typedef struct {
     unsigned int hitMatIndex;
     v3 normal;
 } ray_payload_t;
+
+typedef struct {
+    int width,height;
+    v3 *data;
+} texture_t;
 
 typedef struct {
     unsigned int lightCount;

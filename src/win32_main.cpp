@@ -8,6 +8,9 @@
 #define CGLTF_IMPLEMENTATION
 #include "external/cgltf.h"
 
+//#define STB_IMAGE_IMPLEMENTATION, already defined in the engine translation unit.
+#include "stb_image.h"
+
 #define NC_DS_IMPLEMENTATION
 #include "nc_ds.h"
 
@@ -28,7 +31,6 @@
 #define FOCAL_LENGTH 0.098f
 
 static v3 TonemapPass(v3 pixel);
-
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
 static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
 void visualizer(game_memory_t *gameMemory);
@@ -36,8 +38,10 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
 rtas_node_t GenerateAccelerationStructure(world_t *world);
 void LoadGltf();
+void LoadBespokeTextures();
 bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
-v3 brdf(material_t &mat);
+v3 brdf(material_t &mat,v3 surfPt);
+v3 SampleTexture(texture_t tex, v2 uv);
 
 constexpr bool use_pinhole=false;
 static world_t g_world = {};
@@ -49,6 +53,7 @@ static plane_t g_planes[1] = {};
 static sphere_t g_spheres[3] = {};
 static mesh_t g_meshes[1]={};
 static aabb_t g_aabbs[1]={};
+static texture_t g_textures[1]={};
 
 void AddDynamicMaterial(material_t mat)
 {
@@ -99,7 +104,7 @@ RENDERING FEATURES:
     - do more than a cursory read of https://64.github.io/tonemapping/ and integrate real camera response.
 / add light sources: directional, point, area.
     X directional.
-    - point.
+    X point.
     - to do area lights, e.g. a triangle light, we will need to uniformly sample the light.
     the approach here is rejection sampling. for N samples, require 2*N (but this will vary
     depending on the geometry); it's related to the area ratios.
@@ -115,7 +120,11 @@ X add rendering of triangle geometry.
     - uniform sampling in hemisphere.
 / refraction
     - different wavelengths refract differently.
-- textures for materials.
+/ textures for PBR materials.
+    X diffuse.
+    - bump map.
+    - roughness.
+    - metalness.
 X diffuse and specular interaction with surfaces via fresnel equations.
 - subsurface scattering.
 / physical camera modelling (e.g. lens).
@@ -442,7 +451,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                 assert(ks_local>=0.f&&ks_local<=1.f);
                 
                 radiance += tapContrib *
-                    Hadamard(RayCast(world,rayOrigin,rayDirBounce,depth+1), kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
+                    Hadamard(RayCast(world,rayOrigin,rayDirBounce,depth+1), kd_local*brdf(mat,rayOrigin)+ks_local*V3(F0,F0,F0));
             }
 #endif
         } // END FOR.
@@ -498,7 +507,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
 
                 auto payload=RayCastIntersect(world,rayOrigin,lightDir);
                 if (payload.hitMatIndex==0 || (payload.hitDistance>hitThreshold&&payload.hitDistance>minHitDistance) ) {
-                    radiance += tapContrib * Hadamard( attenuation*light.radiance, kd_local*brdf(mat)+ks_local*V3(F0,F0,F0));
+                    radiance += tapContrib * Hadamard( attenuation*light.radiance, kd_local*brdf(mat,rayOrigin)+ks_local*V3(F0,F0,F0));
                 }
             }
         }
@@ -810,6 +819,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     g_lights[0].radiance = 3.f *g_materials[0].emitColor;
 
     g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
+    g_materials[1].albedoIdx=1;
+
     g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
     g_materials[2].refractionIndex=2.417f; // diamond.
     //g_materials[2].alpha=0.0f; // diamond.
@@ -849,6 +860,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     g_aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
     g_aabbs[0].matIndex = 4;
     g_meshes[0].points=nullptr;
+    LoadBespokeTextures();
     //LoadGltf();
     g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
     g_world.lightCount = ARRAY_COUNT(g_lights);
@@ -1302,12 +1314,15 @@ void LoadGltf()
 }
 
 // bi-directional reflectance distribution function.
-v3 brdf(material_t &mat)
+v3 brdf(material_t &mat, v3 surfPoint)
 {
-    if (mat.albedoIdx==0){
+    if (mat.albedoIdx==0) {
         return mat.albedo;
-    }else{
-        assert(false);
+    } else {
+        texture_t tex=g_textures[mat.albedoIdx-1];
+        // Via the material mapping (might be UVs or some other function), sample the texture.
+        v2 uv = {surfPoint.x,surfPoint.y};//for now.
+        return SampleTexture(tex, v2{uv.x*float(tex.width),uv.y*float(tex.height)} );
     }
     return V3(1.f,1.f,1.f);
 }
@@ -1353,7 +1368,7 @@ bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refracti
     return true;
 }
 
-// ACES,approximation by Krzysztof Narkowicz.
+// ACES, approximation by Krzysztof Narkowicz.
 static v3 TonemapPass(v3 color) {    
     const float a = 2.51f;
     const float b = 0.03f;
@@ -1363,4 +1378,46 @@ static v3 TonemapPass(v3 color) {
     color = Clamp( HadamardDiv( Hadamard(color, a*color + V3(b,b,b)) , V3(e,e,e) + Hadamard(color,c*color+V3(d,d,d)) ), 
         V3(0.0f, 0.0f, 0.0f), V3(1.0f, 1.0f, 1.0f));
     return color;
+}
+
+v3 SampleTexture(texture_t tex, v2 uv) {
+    //right now we only support bilinear filtering.
+    int x1,x2,y1,y2;
+    float s,t;
+    uv={abs(uv.x),abs(uv.y)};
+    x1=uv.x;
+    y1=uv.y;
+    s=uv.x-x1;
+    t=uv.y-y1;
+    x1=x1%tex.width;
+    x2=(x1+1)%tex.width;
+    y1=y1%tex.height;
+    y2=(y1+1)%tex.height;
+    v3 top,bottom;
+    top=Lerp(tex.data[y1*tex.width+x1],tex.data[y1*tex.width+x2],s);
+    bottom=Lerp(tex.data[y2*tex.width+x1],tex.data[y2*tex.width+x2],s);
+    return Lerp(top,bottom,t);
+}
+
+void LoadBespokeTextures(){
+    //    // ... process data if not NULL ...
+    //    // ... x = width, y = height, n = # 8-bit components per pixel ...
+    //    // ... replace '0' with '1'..'4' to force that many components per pixel
+    //    // ... but 'n' will always be the number that it would have been if you said 0
+    //    
+    int x,y,n;
+    unsigned int *data = (unsigned int *)stbi_load("res\\marble-512-diffuse.jpg", &x, &y, &n, 4);
+    if (data!=NULL){
+        g_textures[0].width=x;
+        g_textures[0].height=y;
+        g_textures[0].data=(v3*)malloc(sizeof(v3)*x*y);
+        for (int Y=0;Y<y;Y++)
+        for (int X=0;X<x;X++) {
+            unsigned int pixel=data[Y*x+X];
+            g_textures[0].data[Y*x+X].x=float(pixel&0xFF)/255.f;
+            g_textures[0].data[Y*x+X].y=float((pixel>>8)&0xFF)/255.f;
+            g_textures[0].data[Y*x+X].z=float((pixel>>16)&0xFF)/255.f;
+        }
+        stbi_image_free(data);
+    }
 }
