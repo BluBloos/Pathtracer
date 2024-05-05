@@ -17,8 +17,8 @@
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
-#define RAYS_PER_PIXEL 4              // for antialiasing.
-#define RENDER_EQUATION_TAP_COUNT 8
+#define RAYS_PER_PIXEL_MAX 512              // for antialiasing.
+#define RENDER_EQUATION_MAX_TAP_COUNT 16
 #define MIN_HIT_DISTANCE float(1e-5)
 #define WORLD_SIZE 5.0f
 #define LEVELS 6
@@ -40,12 +40,19 @@ rtas_node_t GenerateAccelerationStructure(world_t *world);
 void LoadGltf();
 void LoadBespokeTextures();
 bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
-v3 brdf(material_t &mat,v3 surfPt);
+v3 brdf_diff(material_t &mat,v3 surfPt);
+v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
 v3 SampleTexture(texture_t tex, v2 uv);
+v3 BespokeSampleTexture(texture_t tex, v2 uv);
 
-constexpr bool use_pinhole=false;
+float Schlick(float F0, float cosTheta);
+v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
+float MaskingShadowing(v3 normal, v3 L, v3 V, float roughness);
+float GGX(v3 N, v3 H, float roughness);
+
+constexpr bool use_pinhole=true;
 static world_t g_world = {};
-static light_t g_lights[2]={};
+static light_t g_lights[1]={};
 constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
 static int g_dynamicMaterialCount;
 static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
@@ -53,7 +60,7 @@ static plane_t g_planes[1] = {};
 static sphere_t g_spheres[3] = {};
 static mesh_t g_meshes[1]={};
 static aabb_t g_aabbs[1]={};
-static texture_t g_textures[1]={};
+static texture_t g_textures[4]={};
 
 void AddDynamicMaterial(material_t mat)
 {
@@ -78,11 +85,12 @@ static float g_halfFilmH;
 static v3 g_filmCenter;
 float g_halfPixW;
 float g_halfPixH;
-constexpr unsigned int raysPerPixel = RAYS_PER_PIXEL;
 image_32_t g_image = {};
 
 static HANDLE g_masterThreadHandle;
 static int g_tc; // thread count.
+static int g_sc; // sample count (render equation tap count).
+static int g_pp; // rays per pixel.
 
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
 extern int __argc;
@@ -97,6 +105,7 @@ X render proper orientation at runtime.
 / Add cmdline processing.
     X thread count.
     - output image filepath; dynamically find extension and output based on that.
+    - allow for disable DOF.
 - usage/help print if supply -h.
 - use stb_image_write to support .PNG and .JPG.
 RENDERING FEATURES:
@@ -118,6 +127,9 @@ X add rendering of triangle geometry.
 / accelerate triangle geometry rendering via occtree.
 / approximate the rendering equation.
     - uniform sampling in hemisphere.
+    / proper implementation of a BRDF model (GGX).
+    - specular antialiasing:
+        - despite shaky theory, can use Toksvig equation.
 / refraction
     - different wavelengths refract differently.
 / textures for PBR materials.
@@ -125,11 +137,14 @@ X add rendering of triangle geometry.
     - bump map.
     - roughness.
     - metalness.
+    - mipmapping.
 X diffuse and specular interaction with surfaces via fresnel equations.
 - subsurface scattering.
 / physical camera modelling (e.g. lens).
     X depth of field
     - exposure
+- antialiasing:
+    - use statified sampling.
 - accelerate and improve quality with denoising.
 - importance sampling.
 - add early ray termintation via russian roulette.
@@ -138,6 +153,16 @@ PERFORMANCE:
 - "Some threads finish all their texels, while others are still working" - we are wasting potential good work!
    We need the master thread to notice and assign those lazy threads more work.
 - SIMD?
+*/
+
+/*
+FUTURE WORK:
+- add support for anisotropic BRDFs (would allow for rendering e.g. brushed metal).
+- support very rough metals via multiple bounce surface reflection in the BRDF; currently such surfaces (and others?)
+  rendered via current system are too dark.
+- add BRDF models for cloth.
+- add support for materials with nanogeometry , where geometric optics model breaks down (e.g. thin films).
+- there's a whole can of worms when it comes to specular antialiasing. Open it!
 */
 
 static unsigned int GetTotalPixelSize(image_32_t image) {
@@ -318,10 +343,8 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     return p;
 }
 
-static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
-
-    float Schlick(float F0, float cosTheta);
-    
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
+{
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
     v3 rayOrigin, rayDirection;
 
@@ -331,93 +354,99 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
     rayOrigin=o;
     rayDirection=d;
 
-#if 0
-    int tapCount=1,tapIdxStart=0;
-    // bounceCount == 4.
-    // 4 iterations.
-    // first iter = generates RENDER_EQUATION_TAP_COUNT rays.
-    // next iter  = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT rays.
-    // third iter = generates RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT.
-    // final iter = no arrays generated.
-    constexpr int maxPossibleRays = RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT +
-        (RENDER_EQUATION_TAP_COUNT)*RENDER_EQUATION_TAP_COUNT +
-        RENDER_EQUATION_TAP_COUNT;
-
-    static v3 origins[maxPossibleRays];
-    static v3 directions[maxPossibleRays];
-    static v3 radiances[maxPossibleRays];
-
-    struct HitState /* HitState is the "structure tag" */ {
-        int matIdx;
-        float theta[RENDER_EQUATION_TAP_COUNT];
-    };
-
-    // the "origins" and "directions" store the outgoing rays from a particular surface point.
-    // the "states" array stores the incoming rays at the same point where the outgoing rays emit from.
-    static struct HitState states[maxPossibleRays]={};
-
-    //static int isLive[maxPossibleRays]={};
-
-    origins[0] = o;
-    directions[0] = d;
-    memset(states, 0xDEADBEEF, sizeof(states));
-    //isLive[0]=1;
-
-    //for (int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT; ++bounceCount) {
-        // NOTE: we use newTapCount idea because rays should only become "live" on the next bounce.
-        //int newTapCount=tapCount;
-
-
-        //for (int tapIdx=tapIdxStart; tapIdx < tapCount; tapIdx++) {
-
-
-    rayOrigin=origins[tapIdx];
-            rayDirection=directions[tapIdx];
-            //if (!isLive[tapIdx]) continue;
-#endif
-
     ray_payload_t p;
     float &hitDistance = p.hitDistance;
     unsigned int &hitMatIndex = p.hitMatIndex;
     v3 &nextNormal = p.normal;
     p=RayCastIntersect(world, rayOrigin, rayDirection);
-    
+      
     material_t mat = world->materials[hitMatIndex];
-    if (hitMatIndex) { 
+    do {
+    if (hitMatIndex) {
 
-        float ks,kd,cosTheta,NdotL,F0;
+        float cosTheta,NdotL,NdotV,F0,metalness;
+        v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3;
 
         cosTheta=(Dot(nextNormal, rayDirection));
         cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
 
-        // How much light is transmitted and how much is reflected?
-        // it changes depending on the angle of incidence and the material interface
-        // properties; it also depends if the light is p or s-polarized.
-        //
-        // here, ks is the amount of reflected light and kd is the amount of trasmitted light.
-        //
-        // but alas, because we don't care about being that accurate, we can just use
-        // Schlick's approximation: https://en.wikipedia.org/wiki/Schlick%27s_approximation.
-        F0 = Square((N_AIR-mat.refractionIndex)/(N_AIR+mat.refractionIndex));
-        ks = F0+(1.f-F0)*powf(1.f-fabsf(cosTheta),5.f);
-        kd=1.f-ks;
-        assert(ks>=0.f&&ks<=1.f);
+        F0 = Square((N_AIR-mat.ior)/(N_AIR+mat.ior)); // NOTE: need to change when support refraction again.
 
-        int tapCount = RENDER_EQUATION_TAP_COUNT;
+        int tapCount = g_sc;
         float tapContrib = 1.f / float(tapCount + world->lightCount);
 
         rayOrigin = rayOrigin + hitDistance * rayDirection;
-        v3 pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
+        pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
 
-        float ks_local,kd_local;
-        v3 halfVector,N;
         N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
+        V=-rayDirection;
+
+        // Via the material mapping (might be UVs or some other function), sample the texture.
+        v2 uv = {rayOrigin.x,rayOrigin.y};//for now.
+
+        // find the metalness.
+        {
+            if (mat.metalnessIdx==0) {
+                metalness=mat.metalness;
+            } else {
+                texture_t tex=g_textures[mat.metalnessIdx-1];
+                r3 = BespokeSampleTexture(tex, uv );
+                metalness=r3.x;
+            }
+        }
+
+        // find the normal.
+        if (mat.normalIdx!=0){
+            texture_t tex=g_textures[mat.normalIdx-1];
+            N = BespokeSampleTexture(tex, uv );
+            // NOTE: this currently only works for the ground plane, since it's normal happens to be up!
+            N = Normalize(2.f*N - V3(1.f,1.f,1.f));
+        }
+
+        if (Dot(N, V)<=0.f) break;
+
+        // cast the shadow ray(s).
+        for (unsigned int i=0;i<world->lightCount;i++) {
+            light_t &light=world->lights[i];
+            float hitThreshold=FLT_MAX,attenuation=1.f;
+            switch(light.kind){
+                case LIGHT_KIND_DIRECTIONAL:
+                {
+                    L=-1.f*light.direction;
+                } break;
+                case LIGHT_KIND_POINT:
+                {
+                    L=light.position-rayOrigin;
+                    hitThreshold=Magnitude(L);
+                    L=(1.f/hitThreshold)*L;//normalize.
+                    attenuation=powf(2.7f,-0.1f*hitThreshold);
+                } break;
+                case LIGHT_KIND_TRIANGLE:
+                break;
+            }
+
+            halfVector =(1.f/Magnitude(L+V)) * (L+V);
+            cosTheta=Dot(halfVector,L);
+
+            if ((NdotL=Dot(N, L))>0.f && attenuation>0.f) {
+                assert(cosTheta>=0.f);
+                ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
+                kd_local=V3(1.f,1.f,1.f)-ks_local;
+                for (int i = 0;i < 3;i++) assert(ks_local.E[i] >= 0.f && ks_local.E[i] <= 1.f);
+                kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
+                brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin))+
+                    Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ));
+
+                auto payload=RayCastIntersect(world,rayOrigin,L);
+                if (payload.hitMatIndex==0 || (payload.hitDistance>hitThreshold&&payload.hitDistance>minHitDistance) ) {
+                    radiance += tapContrib * NdotL * Hadamard( attenuation*light.radiance, brdfTerm );
+                }
+            }
+        }
 
         // spawn the new rays.
         for (int i=0;i<tapCount;i++)
         {
-            v3 rayDirBounce;
-
             v3 randomBounce = Normalize(
                 (N) + V3(
                     RandomBilateral(),
@@ -425,35 +454,26 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
                     RandomBilateral()
                 )
             );
-            rayDirBounce = Normalize(Lerp(pureBounce, randomBounce, mat.roughness));
-            
-#if 0
-            if (bounceCount<MAX_BOUNCE_COUNT-1) { 
-                origins[newTapCount] = rayOrigin;
-                directions[newTapCount] = rayDirection;
-                isLive[newTapCount]=true;
-                newTapCount++;
-                NdotL=theta = Dot(nextNormal,rayDirection);
-                states[tapIdx].theta[i] = theta;
-                //isLive[tapIdx]=false; // kill the parent ray.
-            } else {
-                // since the next ray will not accumulate, accumulation needs to happen here.
-            }
-#else
-            halfVector =(1.f/Magnitude(rayDirBounce-rayDirection)) * (rayDirBounce-rayDirection);
-            cosTheta=Dot(halfVector,rayDirBounce);
+            //L = Normalize(Lerp(pureBounce, randomBounce, 0.f));
+            L = pureBounce;
 
-            if (Dot(N, rayDirBounce)>0.f) {
+            halfVector =(1.f/Magnitude(L+V)) * (L+V);
+            cosTheta=Dot(halfVector,L);
 
-                assert(cosTheta>=0.f);
-                ks_local = Schlick(F0,cosTheta);
-                kd_local=1.f-ks_local;
-                assert(ks_local>=0.f&&ks_local<=1.f);
-                
-                radiance += tapContrib *
-                    Hadamard(RayCast(world,rayOrigin,rayDirBounce,depth+1), kd_local*brdf(mat,rayOrigin)+ks_local*V3(F0,F0,F0));
+            if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
+            {
+                assert(cosTheta>0.f);
+                assert(Dot(halfVector,V)>0.f);
+
+                ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
+                kd_local=V3(1.f,1.f,1.f)-ks_local;
+                for(int i=0;i<3;i++) assert(ks_local.E[i] >= 0.f && ks_local.E[i] <= 1.f);
+                kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
+                brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin))+
+                    Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ));
+
+                radiance += tapContrib * NdotL * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
             }
-#endif
         } // END FOR.
 
         // How to think about the refraction ray?
@@ -469,98 +489,22 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth) {
         // should be 'opacity' of the reflected ray and '1-opacity' of the
         // refracted ray.
 
+        // disable refraction for now.
+#if 0
         if (mat.alpha < 1.0f) { // not completely opaque
 
             v3 refractionDirection;
-            if (FindRefractionDirection(rayDirection, nextNormal, mat.refractionIndex, refractionDirection))
+            if (FindRefractionDirection(rayDirection, nextNormal, mat.ior, refractionDirection))
                 radiance += kd*(1.f-mat.alpha) * RayCast(world, rayOrigin, refractionDirection, depth);
         }
-
-        // cast the shadow ray(s).
-        for (unsigned int i=0;i<world->lightCount;i++) {
-            light_t &light=world->lights[i];
-            float hitThreshold=FLT_MAX,attenuation=1.f;
-            v3 lightDir;
-            switch(light.kind){
-                case LIGHT_KIND_DIRECTIONAL:
-                {
-                    lightDir=-1.f*light.direction;
-                } break;
-                case LIGHT_KIND_POINT:
-                {
-                    lightDir=light.position-rayOrigin;
-                    hitThreshold=Magnitude(lightDir);
-                    lightDir=(1.f/hitThreshold)*lightDir;//normalize.
-                    attenuation=powf(2.7f,-0.1f*hitThreshold);
-                } break;
-                case LIGHT_KIND_TRIANGLE:
-                break;
-            }
-            halfVector =(1.f/Magnitude(lightDir-rayDirection)) * (lightDir-rayDirection);
-            cosTheta=Dot(halfVector,lightDir);
-
-            if (Dot(N, lightDir)>0.f && attenuation>0.f) {
-                assert(cosTheta>=0.f);
-                ks_local = Schlick(F0,cosTheta);
-                kd_local=1.f-ks_local;
-                assert(ks_local>=0.f&&ks_local<=1.f);
-
-                auto payload=RayCastIntersect(world,rayOrigin,lightDir);
-                if (payload.hitMatIndex==0 || (payload.hitDistance>hitThreshold&&payload.hitDistance>minHitDistance) ) {
-                    radiance += tapContrib * Hadamard( attenuation*light.radiance, kd_local*brdf(mat,rayOrigin)+ks_local*V3(F0,F0,F0));
-                }
-            }
-        }
-
-    } // END IF.
-
-    radiance += mat.emitColor;
-            
-// premature optimization is the root of all evil?
-#if 0
-//states[tapIdx].matIdx=hitMatIndex;
-        //}
-        //tapIdxStart=tapCount;
-        //tapCount=newTapCount;
-    //}
-
-    // accumulate the radiance, going backwards through the data.
-    // we reduce the tree-structured data as we go through.
-    memset(radiances,0,sizeof(radiances));
-    int stride=RENDER_EQUATION_TAP_COUNT*RENDER_EQUATION_TAP_COUNT;
-    for (int bounceCount = 0; bounceCount < MAX_BOUNCE_COUNT-1; ++bounceCount) {
-        for (int j=0;j<RENDER_EQUATION_TAP_COUNT;j++)
-            {
-                int matIndexOut,matIndexIn,idxOut,idxIn;
-                float thetaIn;
-                material_t matOut,matIn;
-
-                idxOut=(j*stride)/RENDER_EQUATION_TAP_COUNT;
-                idxIn=(j*stride);
-                if (idxOut==idxIn) continue;//don't double count radiance.
-
-                matIndexOut=states[idxOut];
-                matIndexIn=states[idxIn].matIndex;
-                if (matIndexIn==0xDEADBEEF) continue;//skip early terminated rays.
-                
-                matOut = world->materials[matIndexOut];
-                matIn = world->materials[matIndexIn];
-
-                radiances[idxIn] += matIn.emitColor;
-
-                if (bounceCount==0) continue; // last level has no incoming rays.
-                thetaIn = states[idxOut].theta[j];
-                radiances[idxOut] += cos(thetaIn) * Hadamard(radiances[idxIn], brdf(matOut));            
-            }
-        stride/=RENDER_EQUATION_TAP_COUNT;
-    }
 #endif
 
-    return radiance;
-}
+    } // END IF.
+    } while(false);
 
-float Schlick(float F0, float cosTheta) {
-    return F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
+    radiance += mat.emitColor;
+
+    return radiance;
 }
 
 // TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
@@ -592,6 +536,8 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWindowName = "Raytracer";
 
     g_tc=MAX_THREAD_COUNT;
+    g_sc=8;
+    g_pp=4;
 
     // process cmdline args.
     for( char **argv=__argv; *argv; argv++ )
@@ -600,6 +546,12 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
                 switch( c ) {
                     case 't':
                         g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
+                        break;
+                    case 's':
+                        g_sc=max(0,min(RENDER_EQUATION_MAX_TAP_COUNT,atoi(argv[0])));
+                        break;
+                    case 'p':
+                        g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
                         break;
                     default:
                         // nothing to see here, folks.
@@ -634,8 +586,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                 v3 color = {};
 
                 if ( use_pinhole ) {
-                    float contrib = 1.0f / (float)raysPerPixel;
-                    for (unsigned int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) {
+                    float contrib = 1.0f / (float)g_pp;
+                    for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) {
                         float offX = filmX + (RandomBilateral() * g_halfPixW);
                         float offY = filmY + (RandomBilateral() * g_halfPixH);
                         v3 filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
@@ -645,7 +597,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                     }
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
                 {
-                    float contrib = 1.0f / (float)raysPerPixel/(float)raysPerPixel;
+                    float contrib = 1.0f / (float)g_pp/(float)g_pp;
 
                     // the poisson disk samples
                     const int NUM_SAMPLES = 12;     // the number of samples to take.
@@ -665,7 +617,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                         V2(-0.26496911, -0.41893023)
                     };
 
-                    for (unsigned int rayIndex = 0; rayIndex < raysPerPixel; rayIndex++) { // integrate across image sensor.
+                    for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) { // integrate across image sensor.
                         
                         float offX = filmX + (RandomBilateral() * g_halfPixW);
                         float offY = filmY + (RandomBilateral() * g_halfPixH);
@@ -687,7 +639,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                         focalPoint=rayOrigin+t*rayDirection;
 
                         // sample poisson disk point.
-                        for (unsigned int rayIndex2 = 0; rayIndex2 < raysPerPixel; rayIndex2++) {
+                        for (unsigned int rayIndex2 = 0; rayIndex2 < g_pp; rayIndex2++) {
 
                             v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
                             v3 rayOriginDisk,rayDirectionDisk;
@@ -812,23 +764,27 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
     
-    g_materials[0].emitColor = V3(0.3f, 0.4f, 0.5f);
+    g_materials[0].emitColor = V3(65/255.f,108/255.f,162/255.f);
 
     g_lights[0].kind = LIGHT_KIND_DIRECTIONAL;
-    g_lights[0].direction = Normalize(V3(1.f,-1.f,-1.f));
-    g_lights[0].radiance = 3.f *g_materials[0].emitColor;
+    g_lights[0].direction = Normalize(V3(1.f,1.f,-1.f));
+    g_lights[0].radiance = 3.f *V3(1.f,1.f,1.f); //g_materials[0].emitColor;
 
-    g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
+    //g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
     g_materials[1].albedoIdx=1;
+    g_materials[1].metalnessIdx=2;
+    g_materials[1].roughnessIdx=3;
+    g_materials[1].normalIdx=4;
+    g_materials[1].metalColor=V3(0.562f,0.565f,0.578f);//iron in air.
 
     g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
-    g_materials[2].refractionIndex=2.417f; // diamond.
+    g_materials[2].ior=2.417f; // diamond.
     //g_materials[2].alpha=0.0f; // diamond.
     g_materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
     g_materials[3].roughness = 0.0f;
-    g_materials[3].refractionIndex=1.31f; // ice.    
+    g_materials[3].ior=1.31f; // ice.    
     g_materials[4].albedo = V3(0.3f, 0.25f, 0.7f);
-    g_materials[4].refractionIndex=1.544f; // fused silica; a pure form of glass.    
+    g_materials[4].ior=1.544f; // fused silica; a pure form of glass.    
     { // generate debug g_materials for occtree voxels.
         int s=1<<LEVELS;
         for (int i=0;i<s;i++)
@@ -837,7 +793,6 @@ void automata_engine::Init(game_memory_t *gameMemory) {
         {
             g_materials[5 + i * s * s + j * s + k].albedo = V3( s/(float)i,s/(float)j,s/(float)k );
             g_materials[5 + i * s * s + j * s + k].roughness=1.f;
-            g_materials[5 + i * s * s + j * s + k].refractionIndex=1.f;
         }
     }
 
@@ -1313,18 +1268,54 @@ void LoadGltf()
     } while(0);
 }
 
-// bi-directional reflectance distribution function.
-v3 brdf(material_t &mat, v3 surfPoint)
+v3 brdf_diff(material_t &mat, v3 surfPoint)
 {
+    float piTerm=1.f/PI;
     if (mat.albedoIdx==0) {
-        return mat.albedo;
+        return piTerm*mat.albedo;
     } else {
         texture_t tex=g_textures[mat.albedoIdx-1];
         // Via the material mapping (might be UVs or some other function), sample the texture.
         v2 uv = {surfPoint.x,surfPoint.y};//for now.
-        return SampleTexture(tex, v2{uv.x*float(tex.width),uv.y*float(tex.height)} );
+        return piTerm*BespokeSampleTexture(tex, uv );
     }
-    return V3(1.f,1.f,1.f);
+    return piTerm*V3(1.f,1.f,1.f);
+}
+
+v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H)
+{
+    float roughness;
+    // Via the material mapping (might be UVs or some other function), sample the texture.
+    v2 uv = {surfPoint.x,surfPoint.y};//for now.
+
+    //float scaling=1.f/255.f;
+
+    if (mat.roughnessIdx==0) {
+        roughness=mat.roughness;
+    } else {
+        texture_t tex=g_textures[mat.roughnessIdx-1];
+        v3 r3 = BespokeSampleTexture(tex, uv );
+        roughness=r3.x;
+    }
+
+#if 0
+    if (mat.normalIdx!=0){
+        texture_t tex=g_textures[mat.normalIdx-1];
+        normal = BespokeSampleTexture(tex, uv );
+        normal = Normalize( normal);
+    }
+#endif
+
+    v3 spec=
+        /*HammonMaskingShadowing()**
+        SchlickMetal(float F0, float cosTheta, metalness, 
+            mat.metalColor //for now.
+        );*/
+        GGX(normal, H, roughness)*
+        MaskingShadowing(normal, L, V, roughness)*
+        (0.25f/fabsf(Dot(normal,L))/fabsf(Dot(normal,V)))*
+        V3(1.f,1.f,1.f);
+    return spec;
 }
 
 // Finds the refraction direction of a ray that is *arriving* in
@@ -1380,6 +1371,11 @@ static v3 TonemapPass(v3 color) {
     return color;
 }
 
+v3 BespokeSampleTexture(texture_t tex, v2 uv) {
+    uv=v2{uv.x*float(tex.width)*0.5f,uv.y*float(tex.height)*0.5f};
+    return SampleTexture(tex,uv);
+}
+
 v3 SampleTexture(texture_t tex, v2 uv) {
     //right now we only support bilinear filtering.
     int x1,x2,y1,y2;
@@ -1387,37 +1383,108 @@ v3 SampleTexture(texture_t tex, v2 uv) {
     uv={abs(uv.x),abs(uv.y)};
     x1=uv.x;
     y1=uv.y;
-    s=uv.x-x1;
-    t=uv.y-y1;
+    s=uv.x-float(x1);
+    t=uv.y-float(y1);
+    // NOTE: I am aware of the precision loss for large floating point values.
+    // when so far away from the camera, it's like, whatever dude.
+    s = min(1.f, max(s, 0.f));
+    t = min(1.f, max(t, 0.f));
     x1=x1%tex.width;
     x2=(x1+1)%tex.width;
     y1=y1%tex.height;
     y2=(y1+1)%tex.height;
     v3 top,bottom;
+
+    assert(x1>=0&&x1<tex.width);
+    assert(x2>=0&&x2<tex.width);
+    assert(y1>=0&&y1<tex.height);
+    assert(y2>=0&&y2<tex.height);
+    assert(s>=0.f&&s<=1.f);
+    assert(t>=0.f&&t<=1.f);
+
     top=Lerp(tex.data[y1*tex.width+x1],tex.data[y1*tex.width+x2],s);
     bottom=Lerp(tex.data[y2*tex.width+x1],tex.data[y2*tex.width+x2],s);
     return Lerp(top,bottom,t);
 }
 
 void LoadBespokeTextures(){
+
+    void LoadTexture(texture_t *texOut,const char *filePath);
     //    // ... process data if not NULL ...
     //    // ... x = width, y = height, n = # 8-bit components per pixel ...
     //    // ... replace '0' with '1'..'4' to force that many components per pixel
     //    // ... but 'n' will always be the number that it would have been if you said 0
-    //    
+    //   
+
+    LoadTexture(&g_textures[0], "res\\rusty-metal_albedo.png");
+    LoadTexture(&g_textures[1], "res\\rusty-metal_metallic.png");
+    LoadTexture(&g_textures[2], "res\\rusty-metal_roughness.png");
+    LoadTexture(&g_textures[3], "res\\rusty-metal_normal-ogl.png");
+}
+
+void LoadTexture(texture_t *texOut,const char *filePath) {
     int x,y,n;
-    unsigned int *data = (unsigned int *)stbi_load("res\\marble-512-diffuse.jpg", &x, &y, &n, 4);
+    unsigned int *data = (unsigned int *)stbi_load(filePath, &x, &y, &n, 4);
     if (data!=NULL){
-        g_textures[0].width=x;
-        g_textures[0].height=y;
-        g_textures[0].data=(v3*)malloc(sizeof(v3)*x*y);
+        texOut->width=x;
+        texOut->height=y;
+        texOut->data=(v3*)malloc(sizeof(v3)*x*y);
         for (int Y=0;Y<y;Y++)
         for (int X=0;X<x;X++) {
             unsigned int pixel=data[Y*x+X];
-            g_textures[0].data[Y*x+X].x=float(pixel&0xFF)/255.f;
-            g_textures[0].data[Y*x+X].y=float((pixel>>8)&0xFF)/255.f;
-            g_textures[0].data[Y*x+X].z=float((pixel>>16)&0xFF)/255.f;
+            texOut->data[Y*x+X].x=float(pixel&0xFF)/255.f;
+            texOut->data[Y*x+X].y=float((pixel>>8)&0xFF)/255.f;
+            texOut->data[Y*x+X].z=float((pixel>>16)&0xFF)/255.f;
         }
         stbi_image_free(data);
     }
+}
+
+/*
+the macro BRDF is derived from microfacet theory - a bunch of tiny little flat surfaces, each acting as a perfect
+fresnel mirror. below are the "standard" models.
+*/
+// the real-time rendering book physically-based shading chapter has all the wonderful details.
+// there is also of course: https://learnopengl.com/PBR/Theory.
+/*
+the textures will come in where the Distribution function takes in the roughness - roughness texture.
+there will be a metalness texture, and we'll use that in the fresnel part.
+and of course, there will be the normal map.
+or if we want to be fancy, could use bump map,too.
+
+vec3 kS = F;
+vec3 kD = vec3(1.0) - kS;
+kD *= 1.0 - metallic;	// metal surfaces have a very high absorption!
+
+*/
+v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor) {
+    v3 vF0  = V3(F0,F0,F0);
+    vF0      = Lerp(vF0, surfaceColor, metalness);//surfaceColor depends on the metal.
+    return vF0 + powf(1.f-cosTheta,5.f)*(V3(1.f,1.f,1.f)-vF0);
+}
+
+float Schlick(float F0, float cosTheta) {
+    return F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
+}
+
+float GGX(v3 N, v3 H, float roughness)
+{
+    float a2     = roughness*roughness*roughness*roughness;//Burley parameterization(Disney principled shading model).
+    a2=max(1e-2,a2);// don't let roughness go to zero!
+
+    float NdotH  = Dot(N, H);
+    float denom  = (1.0f + NdotH*NdotH * (a2 - 1.0f));
+    denom        = PI * denom * denom;
+
+    return a2 / denom;
+}
+
+float MaskingShadowing(v3 normal, v3 L, v3 V, float roughness){
+    float a     = roughness*roughness ;//Burley parameterization(Disney principled shading model).
+    a=max(1e-1,a);// don't let roughness go to zero!
+    float Lambda(v3 N, v3 s,float a);
+    return 1.f/(1.f+Lambda(normal,V,a)+Lambda(normal,L,a));
+}
+float Lambda(v3 N, v3 s,float a){
+    return 0.5f*((a/Dot(N,s))-1.f);
 }

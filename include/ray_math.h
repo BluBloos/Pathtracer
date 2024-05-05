@@ -53,6 +53,7 @@ typedef struct {
         struct {
             float r, g, b;
         };
+        float E[3];
     };
 } v3;
 

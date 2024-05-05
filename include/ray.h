@@ -65,12 +65,20 @@ typedef struct material {
     // "specular" is therefore referring to the light that hit the surface and was reflected, never refracting into it.
     //
     // we use the "roughness" term to model how rough the microfacet surface is.
-    float roughness=1.f;
     float alpha=1.f;
-    float refractionIndex=1.f;
+    float ior=1.f;
 
     int albedoIdx=0;
     v3 albedo; // if there is no albedo texture.
+
+    int metalnessIdx=0;
+    float metalness=0.f;
+    v3 metalColor;
+
+    int roughnessIdx=0;
+    float roughness=1.f;
+
+    int normalIdx=0;
     
     v3 emitColor;
 } material_t;
