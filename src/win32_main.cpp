@@ -91,6 +91,10 @@ static HANDLE g_masterThreadHandle;
 static int g_tc; // thread count.
 static int g_sc; // sample count (render equation tap count).
 static int g_pp; // rays per pixel.
+// flags for enablement.
+static bool g_bNormals;
+static bool g_bMetalness;
+static bool g_bRoughness;
 
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
 extern int __argc;
@@ -384,9 +388,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         // Via the material mapping (might be UVs or some other function), sample the texture.
         v2 uv = {rayOrigin.x,rayOrigin.y};//for now.
 
-        // find the metalness.
-        {
-            if (mat.metalnessIdx==0) {
+        { // find the metalness.
+            if (mat.metalnessIdx==0 || !g_bMetalness) {
                 metalness=mat.metalness;
             } else {
                 texture_t tex=g_textures[mat.metalnessIdx-1];
@@ -396,7 +399,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         }
 
         // find the normal.
-        if (mat.normalIdx!=0){
+        if (g_bNormals && mat.normalIdx!=0){
             texture_t tex=g_textures[mat.normalIdx-1];
             N = BespokeSampleTexture(tex, uv );
             // NOTE: this currently only works for the ground plane, since it's normal happens to be up!
@@ -538,6 +541,10 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
     g_sc=8;
     g_pp=4;
 
+    g_bNormals=true;
+    g_bMetalness=true;
+    g_bRoughness=true;
+
     // process cmdline args.
     for( char **argv=__argv; *argv; argv++ )
         if ( *argv[0]=='-' )
@@ -551,6 +558,15 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
                         break;
                     case 'p':
                         g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
+                        break;
+                    case 'n':
+                        g_bNormals=false;
+                        break;
+                    case 'm':
+                        g_bMetalness=false;
+                        break;
+                    case 'r':
+                        g_bRoughness=false;
                         break;
                     default:
                         // nothing to see here, folks.
@@ -1290,21 +1306,13 @@ v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H)
 
     //float scaling=1.f/255.f;
 
-    if (mat.roughnessIdx==0) {
+    if (mat.roughnessIdx==0 || !g_bRoughness) {
         roughness=mat.roughness;
     } else {
         texture_t tex=g_textures[mat.roughnessIdx-1];
         v3 r3 = BespokeSampleTexture(tex, uv );
         roughness=r3.x;
     }
-
-#if 0
-    if (mat.normalIdx!=0){
-        texture_t tex=g_textures[mat.normalIdx-1];
-        normal = BespokeSampleTexture(tex, uv );
-        normal = Normalize( normal);
-    }
-#endif
 
     v3 spec=
         /*HammonMaskingShadowing()**
