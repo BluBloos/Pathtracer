@@ -763,7 +763,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
     
-    g_materials[0].emitColor = V3(65/255.f,108/255.f,162/255.f);
+    g_materials[0].emitColor = V3(65/255.f,108/255.f,162/255.f);//sky.
 
     g_lights[0].kind = LIGHT_KIND_DIRECTIONAL;
     g_lights[0].direction = Normalize(V3(1.f,1.f,-1.f));
@@ -777,7 +777,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     g_materials[1].metalColor=V3(0.562f,0.565f,0.578f);//iron in air.
 
     g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
-    g_materials[2].ior=2.417f; // diamond.
+    //g_materials[2].ior=2.417f; // diamond.
+    g_materials[2].roughness = 0.f;
     //g_materials[2].alpha=0.0f; // diamond.
     g_materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
     g_materials[3].roughness = 0.0f;
