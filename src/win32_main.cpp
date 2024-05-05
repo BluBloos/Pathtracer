@@ -442,7 +442,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
 
                 auto payload=RayCastIntersect(world,rayOrigin,L);
                 if (payload.hitMatIndex==0 || (payload.hitDistance>hitThreshold&&payload.hitDistance>minHitDistance) ) {
-                    radiance += tapContrib * NdotL * Hadamard( attenuation*light.radiance, brdfTerm );
+                    //radiance += tapContrib * NdotL * Hadamard( attenuation*light.radiance, brdfTerm );
+                    radiance += NdotL * Hadamard( attenuation*light.radiance, brdfTerm );//correct coeff for importance sampling, i.e. inclusion of 1/p(x) term.
                 }
             }
         }
@@ -469,7 +470,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
 
                 ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
                 kd_local=V3(1.f,1.f,1.f)-ks_local;
-                for(int i=0;i<3;i++) assert(ks_local.E[i] >= 0.f && ks_local.E[i] <= 1.f);
+                for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
                 kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
                 brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin))+
                     Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ));
@@ -783,7 +784,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
     g_lights[0].kind = LIGHT_KIND_DIRECTIONAL;
     g_lights[0].direction = Normalize(V3(1.f,1.f,-1.f));
-    g_lights[0].radiance = 3.f *V3(1.f,1.f,1.f); //g_materials[0].emitColor;
+    g_lights[0].radiance = 1.5f *V3(1.f,1.f,1.f); //g_materials[0].emitColor;
 
     //g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
     g_materials[1].albedoIdx=1;
@@ -814,7 +815,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
 
     g_lights[1].kind = LIGHT_KIND_POINT;
     g_lights[1].position = V3(2,-5,2);
-    g_lights[1].radiance = 3.f *V3(0.0f, 0.8f, 0.0f);
+    g_lights[1].radiance = 1.5f *V3(0.0f, 0.8f, 0.0f);
 
     g_planes[0].n = V3(0,0,1);
     g_planes[0].d = 0; // plane on origin
