@@ -47,12 +47,12 @@ v3 BespokeSampleTexture(texture_t tex, v2 uv);
 
 float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
-float MaskingShadowing(v3 normal, v3 L, v3 V, float roughness);
+float MaskingShadowing(v3 normal, v3 L, v3 V, v3 H, float roughness);
 float GGX(v3 N, v3 H, float roughness);
 
 constexpr bool use_pinhole=true;
 static world_t g_world = {};
-static light_t g_lights[1]={};
+static light_t g_lights[2]={};
 constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
 static int g_dynamicMaterialCount;
 static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
@@ -463,7 +463,6 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
             if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
             {
                 assert(cosTheta>0.f);
-                assert(Dot(halfVector,V)>0.f);
 
                 ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
                 kd_local=V3(1.f,1.f,1.f)-ks_local;
@@ -1312,7 +1311,7 @@ v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H)
             mat.metalColor //for now.
         );*/
         GGX(normal, H, roughness)*
-        MaskingShadowing(normal, L, V, roughness)*
+        MaskingShadowing(normal, L, V, H, roughness)*
         (0.25f/fabsf(Dot(normal,L))/fabsf(Dot(normal,V)))*
         V3(1.f,1.f,1.f);
     return spec;
@@ -1479,10 +1478,11 @@ float GGX(v3 N, v3 H, float roughness)
     return a2 / denom;
 }
 
-float MaskingShadowing(v3 normal, v3 L, v3 V, float roughness){
+float MaskingShadowing(v3 normal, v3 L, v3 V, v3 H, float roughness){
     float a     = roughness*roughness ;//Burley parameterization(Disney principled shading model).
     a=max(1e-1,a);// don't let roughness go to zero!
     float Lambda(v3 N, v3 s,float a);
+    if (Dot(H,V)<=0.f) return 0.f;
     return 1.f/(1.f+Lambda(normal,V,a)+Lambda(normal,L,a));
 }
 float Lambda(v3 N, v3 s,float a){
