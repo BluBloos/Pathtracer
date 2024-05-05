@@ -1451,21 +1451,10 @@ void LoadTexture(texture_t *texOut,const char *filePath) {
 
 /*
 the macro BRDF is derived from microfacet theory - a bunch of tiny little flat surfaces, each acting as a perfect
-fresnel mirror. below are the "standard" models.
+fresnel mirror. We use GGX(or the Trowbridge-Reitz distribution func) and the Smith joint masking-shadowing.
 */
 // the real-time rendering book physically-based shading chapter has all the wonderful details.
 // there is also of course: https://learnopengl.com/PBR/Theory.
-/*
-the textures will come in where the Distribution function takes in the roughness - roughness texture.
-there will be a metalness texture, and we'll use that in the fresnel part.
-and of course, there will be the normal map.
-or if we want to be fancy, could use bump map,too.
-
-vec3 kS = F;
-vec3 kD = vec3(1.0) - kS;
-kD *= 1.0 - metallic;	// metal surfaces have a very high absorption!
-
-*/
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor) {
     v3 vF0  = V3(F0,F0,F0);
     vF0      = Lerp(vF0, surfaceColor, metalness);//surfaceColor depends on the metal.
