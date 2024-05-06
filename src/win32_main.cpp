@@ -449,23 +449,25 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         }
 
         // spawn the new rays.
-        for (int i=0;i<tapCount;i++)
+        for (int i=0;i<tapCount;)
         {
-            v3 randomBounce = Normalize(
-                (N) + V3(
-                    RandomBilateral(),
-                    RandomBilateral(),
-                    RandomBilateral()
-                )
-            );
+            float theta,phi,x,y,z;
+            theta = RandomUnilateral()*2.f*PI;
+            phi   = acos(z=(1.f-RandomUnilateral()/**0.5f*2.f*/));
+            x = sin(phi) * cos(theta);
+            y = sin(phi) * sin(theta);
+            //z = cos(phi);
+
+            v3 lobeBounce = Normalize(V3(x,y,z));
             //L = Normalize(Lerp(pureBounce, randomBounce, 0.f));
-            L = pureBounce;
+            L = lobeBounce;
 
             halfVector =(1.f/Magnitude(L+V)) * (L+V);
             cosTheta=Dot(halfVector,L);
 
             if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
             {
+                i++;//rejection sampling.
                 assert(cosTheta>0.f);
 
                 ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
