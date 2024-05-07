@@ -2,6 +2,7 @@
 #include <float.h>
 #include <assert.h>
 #include <algorithm>
+#include <random>
 
 #define PI 3.14159265358979323846264338327f
 #define TOLERANCE float(1e-9)
@@ -226,10 +227,19 @@ inline v3 HadamardDiv(v3 a, v3 b) {
     return newvec3;
 }
 
-// TODO(Noah): replcae this with better entropy later
-// return a random value from [0.0, 1.0]
+// https://en.cppreference.com/w/cpp/numeric/random/uniform_real_distribution
+static std::random_device rd;  // Will be used to obtain a seed for the random number engine
+static std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
+static std::uniform_real_distribution<float> dis(0.0, 1.0);
+
 inline float RandomUnilateral() {
-    float result = (float)rand() / (float)RAND_MAX;
+    float result;
+#if 0
+    result = (float)rand() / (float)RAND_MAX;
+#else
+    result = dis(gen);
+#endif
+
     return result;
 }
 
