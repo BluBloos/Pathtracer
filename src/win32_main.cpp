@@ -14,6 +14,8 @@
 #define NC_DS_IMPLEMENTATION
 #include "nc_ds.h"
 
+#define USE_STRATIFIED_SAMPLING 1
+
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
@@ -604,15 +606,43 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                 v3 color = {};
 
                 if ( use_pinhole ) {
-                    float contrib = 1.0f / (float)g_pp;
+                    
+                    float contrib;
+                    v3 rayDirection,filmP,rayOrigin = g_cameraP;
+
+#if USE_STRATIFIED_SAMPLING
+                    contrib = 1.0f / (float)g_pp / (float)g_pp;
+                    for (int i = 0;i < g_pp;i++) {
+                        for (int j = 0;j < g_pp;j++) {
+
+                            float llpixelX = filmX - 1.f * g_halfPixW;
+                            float llpixelY = filmY - 1.f * g_halfPixH;
+                            float stepX = 1.f / g_pp * g_halfPixW*2.f;
+                            float stepY = 1.f / g_pp * g_halfPixH*2.f;
+                            //float halfStep = step / 2.f;
+                            float xStep = llpixelX + float(i) / g_pp * g_halfPixW + stepX*0.5f;
+                            float yStep = llpixelY + float(j) / g_pp * g_halfPixH + stepY*0.5f;
+                           
+                            xStep += (RandomUnilateral() - 0.5f) * stepX;
+                            yStep += (RandomUnilateral() - 0.5f) * stepY;
+
+                            //vec3 dir = (llCorner + xStep * right + yStep * up).normalize();
+                            filmP = g_filmCenter + ( xStep * g_halfFilmW * g_cameraX) + ( yStep * g_halfFilmH * g_cameraY);
+                            rayDirection = Normalize(filmP - g_cameraP);
+                            color = color + contrib * RayCast(&g_world, rayOrigin, rayDirection,0);
+                        }
+                    }
+#else
+                    contrib = 1.0f / (float)g_pp;
                     for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) {
                         float offX = filmX + (RandomBilateral() * g_halfPixW);
                         float offY = filmY + (RandomBilateral() * g_halfPixH);
-                        v3 filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
-                        v3 rayOrigin = g_cameraP;
-                        v3 rayDirection = Normalize(filmP - g_cameraP);
+                        filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
+                        rayDirection = Normalize(filmP - g_cameraP);
                         color = color + contrib * RayCast(&g_world, rayOrigin, rayDirection,0);
                     }
+#endif
+
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
                 {
                     float contrib = 1.0f / (float)g_pp/(float)g_pp;
