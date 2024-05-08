@@ -1620,8 +1620,8 @@ void DefineCamera(camera_t *c) {
     else
         c->focalLength=FIXED_FOCAL_LENGTH;
     
-    c->filmWidth=0.1f;
-    c->filmHeight=0.1f;
+    c->filmWidth=tan(DEG_TO_RAD*c->fov)*2.f*c->focalLength;
+    c->filmHeight=c->filmWidth;
     
     //account for aspect ratio.
     if (g_image.width > g_image.height) {
