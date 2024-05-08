@@ -26,7 +26,6 @@
 #define LEVELS 6
 #define IMAGE_FOCAL_LENGTH 5.f
 #define N_AIR 1.003f
-#define STATIC_MATERIAL_COUNT 5
 #define DYNAMIC_MATERIAL_MAX_COUNT 10
 // here, we use a 35mm=3.5cm camera lens disc.
 #define LENS_RADIUS 0.035f // scene units are 1 = 1m.
@@ -46,6 +45,7 @@ v3 brdf_diff(material_t &mat,v3 surfPt);
 v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
 v3 SampleTexture(texture_t tex, v2 uv);
 v3 BespokeSampleTexture(texture_t tex, v2 uv);
+void LoadWorld(world_kind_t kind);
 
 float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
@@ -54,25 +54,23 @@ float GGX(v3 N, v3 H, float roughness);
 
 constexpr bool use_pinhole=true;
 static world_t g_world = {};
-static light_t g_lights[2]={};
-constexpr int octtreeDebugMaterialCount = (1<<LEVELS)*(1<<LEVELS)*(1<<LEVELS);
-static int g_dynamicMaterialCount;
-static material_t g_materials[STATIC_MATERIAL_COUNT + octtreeDebugMaterialCount + DYNAMIC_MATERIAL_MAX_COUNT] = {};
-static plane_t g_planes[1] = {};
-static sphere_t g_spheres[3] = {};
-static mesh_t g_meshes[1]={};
-static aabb_t g_aabbs[1]={};
+static material_t *g_materials;
+static light_t *g_lights={};
+static plane_t *g_planes = {};
+static sphere_t *g_spheres = {};
+static mesh_t *g_meshes={};
+static aabb_t *g_aabbs={};
+
 static texture_t g_textures[4]={};
 
 void AddDynamicMaterial(material_t mat)
 {
-    assert(g_dynamicMaterialCount<DYNAMIC_MATERIAL_MAX_COUNT);
-    g_materials[STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+g_dynamicMaterialCount++]=mat;
+    nc_sbpush(g_materials, mat);
 }
 
 int MaterialsCount()
 {
-    return STATIC_MATERIAL_COUNT+octtreeDebugMaterialCount+g_dynamicMaterialCount;
+    return nc_sbcount(g_materials);
 }
 
 static v3 g_cameraP = {};
@@ -101,6 +99,13 @@ static bool g_bRoughness;
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
 extern int __argc;
 extern char ** __argv;
+
+/*
+Hierarchy of work:
+- features and correctness first.
+- then performance.
+- then code readability and simpleness.
+*/
 
 /*
 TODO:
@@ -234,7 +239,7 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     // sphere intersection test.
     for (
         unsigned int sphereIndex= 0;
-        sphereIndex < world->sphereCount;
+        sphereIndex < nc_sbcount(world->spheres);
         sphereIndex++
     ) {
         sphere_t sphere = world->spheres[sphereIndex];  
@@ -264,7 +269,7 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     // floor intersection test.
     for (
         unsigned int planeIndex = 0;
-        planeIndex < world->planeCount;
+        planeIndex < nc_sbcount(world->planes);
         planeIndex++
     ) {
         plane_t plane = world->planes[planeIndex];
@@ -323,7 +328,7 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     // AABB intersection test.
     for (
         unsigned int aabbIndex = 0;
-        aabbIndex < world->aabbCount;
+        aabbIndex < nc_sbcount(world->aabbs);
         aabbIndex++
     ) {
         aabb_t box = world->aabbs[aabbIndex];
@@ -411,7 +416,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         if (Dot(N, V)<=0.f) break;
 
         // cast the shadow ray(s).
-        for (unsigned int i=0;i<world->lightCount;i++) {
+        for (unsigned int i=0;i< nc_sbcount(world->lights);i++) {
             light_t &light=world->lights[i];
             float hitThreshold=FLT_MAX,attenuation=1.f;
             switch(light.kind){
@@ -812,74 +817,8 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
     
-    g_materials[0].emitColor = V3(65/255.f,108/255.f,162/255.f);//sky.
+    LoadWorld(WORLD_DEFAULT);
 
-    g_lights[0].kind = LIGHT_KIND_DIRECTIONAL;
-    g_lights[0].direction = Normalize(V3(1.f,1.f,-1.f));
-    g_lights[0].radiance = 1.5f *V3(1.f,1.f,1.f); //g_materials[0].emitColor;
-
-    //g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
-    g_materials[1].albedoIdx=1;
-    g_materials[1].metalnessIdx=2;
-    g_materials[1].roughnessIdx=3;
-    g_materials[1].normalIdx=4;
-    g_materials[1].metalColor=V3(0.562f,0.565f,0.578f);//iron in air.
-
-    g_materials[2].albedo = V3(0.7f, 0.25f, 0.3f);
-    //g_materials[2].ior=2.417f; // diamond.
-    g_materials[2].roughness = 0.f;
-    //g_materials[2].alpha=0.0f; // diamond.
-    g_materials[3].albedo = V3(0.0f, 0.8f, 0.0f);
-    g_materials[3].roughness = 0.0f;
-    g_materials[3].ior=1.31f; // ice.    
-    g_materials[4].albedo = V3(0.3f, 0.25f, 0.7f);
-    g_materials[4].ior=1.544f; // fused silica; a pure form of glass.    
-    { // generate debug g_materials for occtree voxels.
-        int s=1<<LEVELS;
-        for (int i=0;i<s;i++)
-        for (int j=0;j<s;j++)
-        for (int k=0;k<s;k++)
-        {
-            g_materials[5 + i * s * s + j * s + k].albedo = V3( s/(float)i,s/(float)j,s/(float)k );
-            g_materials[5 + i * s * s + j * s + k].roughness=1.f;
-        }
-    }
-
-    g_lights[1].kind = LIGHT_KIND_POINT;
-    g_lights[1].position = V3(2,-5,2);
-    g_lights[1].radiance = 1.5f *V3(0.0f, 0.8f, 0.0f);
-
-    g_planes[0].n = V3(0,0,1);
-    g_planes[0].d = 0; // plane on origin
-    g_planes[0].matIndex = 1;
-    g_spheres[0].p = V3(0,0,0);
-    g_spheres[0].r = 1.0f;
-    g_spheres[0].matIndex = 2;
-    g_spheres[1].p = V3(-1,-5,0);
-    g_spheres[1].r = 1.0f;
-    g_spheres[1].matIndex = 4;
-    g_spheres[2].p = V3(-2,0,2);
-    g_spheres[2].r = 1.0f;
-    g_spheres[2].matIndex = 3;
-    g_aabbs[0]=MakeAABB(v3 {}, v3 {1,1,1});
-    g_aabbs[0].matIndex = 4;
-    g_meshes[0].points=nullptr;
-    LoadBespokeTextures();
-    //LoadGltf();
-    g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
-    g_world.lightCount = ARRAY_COUNT(g_lights);
-    g_world.lights = g_lights;
-    g_world.materialCount = (unsigned int)MaterialsCount();
-    g_world.materials = g_materials;
-    g_world.planeCount = ARRAY_COUNT(g_planes);
-    g_world.planes = g_planes;
-    g_world.sphereCount = ARRAY_COUNT(g_spheres);
-    g_world.spheres = g_spheres;
-    //g_world.aabbCount = ARRAY_COUNT(g_aabbs);
-    g_world.aabbs = g_aabbs;
-    g_world.meshCount = ARRAY_COUNT(g_meshes);
-    g_world.meshes = g_meshes;
-    g_world.rtas = GenerateAccelerationStructure(&g_world);
     // define camera and characteristics
     g_cameraP = V3(0, -10, 1); //  /* go back 10 and up 1 */ : V3(0, 10, 1); /* look down negative Z for physical camera */ 
     g_cameraZ = (use_pinhole)? Normalize(g_cameraP) : -Normalize(g_cameraP);
@@ -957,7 +896,7 @@ rtas_node_t GenerateAccelerationStructure(world_t *world)
     // Triangle intersection test
     for (
         unsigned int meshIndex = 0;
-        meshIndex < world->meshCount;
+        meshIndex < nc_sbcount(world->meshes);
         meshIndex++
     ) {
         mesh_t &mesh = world->meshes[meshIndex];
@@ -1180,6 +1119,8 @@ void AdoptChildren(rtas_node_t &node, rtas_node_t B)
 
 void LoadGltf()
 {
+    nc_sbpush(g_meshes,mesh_t{});//load empty.
+
         do {
         const char *gltfFilePath="res\\mario.glb";
         cgltf_options opt={};
@@ -1497,10 +1438,12 @@ float Schlick(float F0, float cosTheta) {
     return F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
 }
 
+#define MIN_ALPHA_FROM_ROUGHNESS float(0.1f)
+
 float GGX(v3 N, v3 H, float roughness)
 {
     float a2     = roughness*roughness*roughness*roughness;//Burley parameterization(Disney principled shading model).
-    a2=max(1e-2,a2);// don't let roughness go to zero!
+    a2=max(MIN_ALPHA_FROM_ROUGHNESS*MIN_ALPHA_FROM_ROUGHNESS,a2);// don't let roughness go to zero!
 
     float NdotH  = Dot(N, H);
     float denom  = (1.0f + NdotH*NdotH * (a2 - 1.0f));
@@ -1511,11 +1454,134 @@ float GGX(v3 N, v3 H, float roughness)
 
 float MaskingShadowing(v3 normal, v3 L, v3 V, v3 H, float roughness){
     float a     = roughness*roughness ;//Burley parameterization(Disney principled shading model).
-    a=max(1e-1,a);// don't let roughness go to zero!
+    a=max(MIN_ALPHA_FROM_ROUGHNESS,a);// don't let roughness go to zero!
     float Lambda(v3 N, v3 s,float a);
     if (Dot(H,V)<=0.f) return 0.f;
     return 1.f/(1.f+Lambda(normal,V,a)+Lambda(normal,L,a));
 }
 float Lambda(v3 N, v3 s,float a){
     return 0.5f*((a/Dot(N,s))-1.f);
+}
+
+
+void LoadWorld(world_kind_t kind)
+{
+    light_t light;
+    plane_t plane;
+    material_t material;
+    sphere_t sphere;
+
+    material={};
+    material.emitColor = V3(65/255.f,108/255.f,162/255.f);//sky.
+    nc_sbpush(g_materials,material);
+
+    // sun directional light.
+    light={};
+    light.kind = LIGHT_KIND_DIRECTIONAL;
+    light.direction = Normalize(V3(1.f,1.f,-1.f));
+    light.radiance = 1.5f *V3(1.f,1.f,1.f); //g_materials[0].emitColor;
+    nc_sbpush(g_lights,light);
+
+    // ground plane.
+    plane={};
+    plane.n = V3(0,0,1);
+    plane.d = 0; // plane on origin
+    plane.matIndex = 1;
+    nc_sbpush(g_planes,plane);
+
+    switch(kind) {
+        case WORLD_DEFAULT: {
+            // g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
+            material={};
+            material.albedoIdx=1;
+            material.metalnessIdx=2;
+            material.roughnessIdx=3;
+            material.normalIdx=4;
+            material.metalColor=V3(0.562f,0.565f,0.578f);//iron in air.
+            nc_sbpush(g_materials,material);
+            LoadBespokeTextures();
+
+            material={};
+            material.albedo = V3(0.7f, 0.25f, 0.3f);
+            // g_materials[2].ior=2.417f; // diamond.
+            material.roughness = 0.f;
+            nc_sbpush(g_materials,material);
+
+            // g_materials[2].alpha=0.0f; // diamond.
+            material={};
+            material.albedo = V3(0.0f, 0.8f, 0.0f);
+            material.roughness = 0.0f;
+            material.ior=1.31f; // ice.   
+            nc_sbpush(g_materials,material); 
+
+            material={};
+            material.albedo = V3(0.3f, 0.25f, 0.7f);
+            material.ior=1.544f; // fused silica; a pure form of glass.
+            material.roughness = 0.2f;
+            nc_sbpush(g_materials,material);
+
+            sphere={};
+            sphere.p = V3(0,0,0);
+            sphere.r = 1.0f;
+            sphere.matIndex = 2;
+            nc_sbpush(g_spheres,sphere);
+
+            sphere={};
+            sphere.p = V3(-1,-5,0);
+            sphere.r = 1.0f;
+            sphere.matIndex = 4;
+            nc_sbpush(g_spheres,sphere);
+
+            sphere={};
+            sphere.p = V3(-2,0,2);
+            sphere.r = 1.0f;
+            sphere.matIndex = 3;
+            nc_sbpush(g_spheres,sphere);
+        }
+            break;
+        case WORLD_BRDF_TEST: {
+            // Generate an array of materials for debug purposes.
+            for (int i=0;i<10;i++)
+            for (int j=0;j<10;j++)
+            {
+                material={};
+                material.roughness=i/10.f;
+                material.metalness=j/10.f;
+                material.albedo = V3(0.8f, 0.8f, 0.0f);
+                nc_sbpush(g_materials,material); 
+
+                sphere={};
+                sphere.p = V3(-3.f+i/10.f*6.f,-5.f,2.f-j/10.f*2.f);
+                sphere.r = 0.1f;
+                sphere.matIndex = nc_sbcount(g_materials)-1;
+                nc_sbpush(g_spheres,sphere);
+            }
+        }
+            break;
+        case WORLD_MARIO: {
+            LoadGltf();
+            { // generate debug g_materials for occtree voxels.
+                int s=1<<LEVELS;
+                for (int i=0;i<s;i++)
+                for (int j=0;j<s;j++)
+                for (int k=0;k<s;k++)
+                {
+                    //material={};
+                    //g_materials[materialsBefore + i * s * s + j * s + k].albedo = V3( s/(float)i,s/(float)j,s/(float)k );
+                    //g_materials[materialsBefore + i * s * s + j * s + k].roughness=1.f;
+                }
+            }
+            g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
+        }
+            break;
+        case WORLD_SUN_TEMPLE:
+            break;
+    }
+
+    g_world.lights = g_lights;
+    g_world.materials = g_materials;
+    g_world.planes = g_planes;
+    g_world.spheres = g_spheres;
+    g_world.meshes = g_meshes;
+    g_world.rtas = GenerateAccelerationStructure(&g_world);
 }

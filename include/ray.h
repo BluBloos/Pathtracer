@@ -144,17 +144,19 @@ typedef struct {
 } texture_t;
 
 typedef struct {
-    unsigned int lightCount;
+    // all are stretchy buffers.
     light_t *lights;
-    unsigned int materialCount;
     material_t *materials;
-    unsigned int planeCount;
     plane_t *planes;
-    unsigned int sphereCount;
     sphere_t *spheres;
-    unsigned int aabbCount;
     aabb_t *aabbs;
-    unsigned int meshCount;
     mesh_t *meshes;
     rtas_node_t rtas;
 } world_t;
+
+typedef enum world_kind {
+    WORLD_DEFAULT,
+    WORLD_BRDF_TEST,
+    WORLD_MARIO,
+    WORLD_SUN_TEMPLE
+} world_kind_t;

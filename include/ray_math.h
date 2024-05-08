@@ -5,7 +5,10 @@
 #include <random>
 
 #define PI 3.14159265358979323846264338327f
+#define SQRT_PI 1.77245385091f
+#define SQRT_2 1.41421356237f
 #define TOLERANCE float(1e-9)
+#define EULER_NUMBER 2.71828f
 
 struct v2 {
     union {
@@ -247,6 +250,32 @@ inline float RandomUnilateral() {
 inline float RandomBilateral() {
     float result = 2.0f * RandomUnilateral() - 1.0f;
     return result;
+}
+inline float Gaussian(float x, float roughness){
+    float a=roughness;
+    float result = 1.f / (a/SQRT_2/SQRT_PI) * powf( EULER_NUMBER , -1.f*(x*x)/(2.f*a*a));
+    assert(result>0.f);
+    return result;
+}
+
+// Generate a random number from a Gaussian, where
+// x is a uniformly distributed variable.
+#if 0
+inline float RandomNormal(float x, float stddev){
+    // I haven't tried running this, but I think it's going to get us into trouble.
+    float term,a=stddev;
+    term=(x-1.f)*2.f;
+    return SQRT_2 * a * InverseErf(term);
+#else
+inline float RandomNormal(float stddev){
+    // https://en.cppreference.com/w/cpp/numeric/random/normal_distribution
+    static std::random_device rd{};
+    static std::mt19937 gen{rd()};
+    // values near the mean are the most likely
+    // standard deviation affects the dispersion of generated values from the mean
+    std::normal_distribution<float> d{0.0, stddev};
+    return d(gen);
+#endif
 }
 
 inline v3 Clamp(v3 v, v3 Min, v3 Max) {
