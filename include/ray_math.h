@@ -9,6 +9,7 @@
 #define SQRT_2 1.41421356237f
 #define TOLERANCE float(1e-9)
 #define EULER_NUMBER 2.71828f
+#define DEG_TO_RAD (PI / 180.f)
 
 struct v2 {
     union {

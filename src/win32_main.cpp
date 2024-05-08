@@ -1521,6 +1521,11 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                 }
             }
             g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
+
+            //adjust camera.
+            c->target=V3(0,0,1);
+            c->pos=V3(-5, -5, 1); // go back 10 and up 1.
+            c->fov=30.f;
         }
             break;
         case WORLD_SUN_TEMPLE:
@@ -1611,7 +1616,7 @@ void DefineCamera(camera_t *c) {
     // By this point, the "user set" parameters are:
     // pos, use_pinhole, fov, focalDistance, aperatureRadius, and target.
 
-    c->axisZ = (c->use_pinhole)? Normalize(c->pos) : -Normalize(c->pos);
+    c->axisZ = (c->use_pinhole)? Normalize(c->pos-c->target) : -Normalize(c->pos-c->target);
     c->axisX = Normalize(Cross(V3(0,0,1), c->axisZ));
     c->axisY = Normalize(Cross(c->axisZ, c->axisX));
 
