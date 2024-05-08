@@ -22,14 +22,14 @@
 #define RAYS_PER_PIXEL_MAX 512              // for antialiasing.
 #define RENDER_EQUATION_MAX_TAP_COUNT 16
 #define MIN_HIT_DISTANCE float(1e-5)
+
 #define WORLD_SIZE 5.0f
 #define LEVELS 6
-#define IMAGE_FOCAL_LENGTH 5.f
+
 #define N_AIR 1.003f
-#define DYNAMIC_MATERIAL_MAX_COUNT 10
-// here, we use a 35mm=3.5cm camera lens disc.
-#define LENS_RADIUS 0.035f // scene units are 1 = 1m.
-#define FOCAL_LENGTH 0.098f
+
+// fix f
+#define FIXED_FOCAL_LENGTH 0.098f
 
 static v3 TonemapPass(v3 pixel);
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
@@ -45,23 +45,24 @@ v3 brdf_diff(material_t &mat,v3 surfPt);
 v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
 v3 SampleTexture(texture_t tex, v2 uv);
 v3 BespokeSampleTexture(texture_t tex, v2 uv);
-void LoadWorld(world_kind_t kind);
+void LoadWorld(world_kind_t kind,camera_t *c);
 void ParseArgs();
 void PrintHelp();
+void DefineCamera(camera_t *c);
 
 float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
 float MaskingShadowing(v3 normal, v3 L, v3 V, v3 H, float roughness);
 float GGX(v3 N, v3 H, float roughness);
 
-constexpr bool use_pinhole=true;
 static world_t g_world = {};
+static camera_t g_camera = {};
 static material_t *g_materials;
-static light_t *g_lights={};
+static light_t *g_lights = {};
 static plane_t *g_planes = {};
 static sphere_t *g_spheres = {};
-static mesh_t *g_meshes={};
-static aabb_t *g_aabbs={};
+static mesh_t *g_meshes = {};
+static aabb_t *g_aabbs = {};
 
 static texture_t g_textures[4]={};
 
@@ -75,29 +76,19 @@ int MaterialsCount()
     return nc_sbcount(g_materials);
 }
 
-static v3 g_cameraP = {};
-static v3 g_cameraZ = {};
-static v3 g_cameraX = {};
-static v3 g_cameraY = {};
-static float g_filmDist = 0.1f;//10cm.
-static float g_filmW = 0.1f;
-static float g_filmH = 0.1f;
-static float g_halfFilmW;
-static float g_halfFilmH;
-static v3 g_filmCenter;
-float g_halfPixW;
-float g_halfPixH;
 image_32_t g_image = {};
 
+static world_kind_t g_worldKind;
 static HANDLE g_masterThreadHandle;
 static int g_tc; // thread count.
 static int g_sc; // sample count (render equation tap count).
 static int g_pp; // rays per pixel.
+
 // flags for enablement.
 static bool g_bNormals;
 static bool g_bMetalness;
 static bool g_bRoughness;
-static world_kind_t g_worldKind;
+static bool g_use_pinhole;
 
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
 extern int __argc;
@@ -575,43 +566,51 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
         for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++) {
             float filmY = -1.0f + 2.0f * (float)y / (float)g_image.height;
             for (unsigned int x = texel.xPos; x < (texel.width + texel.xPos); x++) {
+                
+                // filmX and filmY are values in the range [-1,1].
                 float filmX = -1.0f + 2.0f * (float)x / (float)g_image.width;
+
                 v3 color = {};
 
-                if ( use_pinhole ) {
+                if ( g_camera.use_pinhole ) {
                     
                     float contrib;
-                    v3 rayDirection,filmP,rayOrigin = g_cameraP;
+                    v3 rayDirection,filmP,rayOrigin = g_camera.pos;
 
 #if USE_STRATIFIED_SAMPLING
                     contrib = 1.0f / (float)g_pp / (float)g_pp;
                     for (int i = 0;i < g_pp;i++) {
                         for (int j = 0;j < g_pp;j++) {
 
-                            float llpixelX = filmX - 1.f * g_halfPixW;
-                            float llpixelY = filmY - 1.f * g_halfPixH;
-                            float stepX = 1.f / g_pp * g_halfPixW*2.f;
-                            float stepY = 1.f / g_pp * g_halfPixH*2.f;
+                            float llpixelX = filmX - 1.f * g_camera.halfFilmPixelW;
+                            float llpixelY = filmY - 1.f * g_camera.halfFilmPixelH;
+                            float stepX = 1.f / g_pp * g_camera.halfFilmPixelW*2.f;
+                            float stepY = 1.f / g_pp * g_camera.halfFilmPixelH*2.f;
                             //float halfStep = step / 2.f;
-                            float xStep = llpixelX + float(i) / g_pp * g_halfPixW + stepX*0.5f;
-                            float yStep = llpixelY + float(j) / g_pp * g_halfPixH + stepY*0.5f;
+                            float xStep = llpixelX + float(i) / g_pp * g_camera.halfFilmPixelW + stepX*0.5f;
+                            float yStep = llpixelY + float(j) / g_pp * g_camera.halfFilmPixelH + stepY*0.5f;
                            
                             xStep += (RandomUnilateral() - 0.5f) * stepX;
                             yStep += (RandomUnilateral() - 0.5f) * stepY;
 
                             //vec3 dir = (llCorner + xStep * right + yStep * up).normalize();
-                            filmP = g_filmCenter + ( xStep * g_halfFilmW * g_cameraX) + ( yStep * g_halfFilmH * g_cameraY);
-                            rayDirection = Normalize(filmP - g_cameraP);
+                            filmP = g_camera.filmCenter + 
+                                ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
+                                ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
+                            rayDirection = Normalize(filmP - g_camera.pos);
                             color = color + contrib * RayCast(&g_world, rayOrigin, rayDirection,0);
                         }
                     }
 #else
+                    // NOTE: this path is now not tested,after the camera refactor.
                     contrib = 1.0f / (float)g_pp;
                     for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) {
-                        float offX = filmX + (RandomBilateral() * g_halfPixW);
-                        float offY = filmY + (RandomBilateral() * g_halfPixH);
-                        filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
-                        rayDirection = Normalize(filmP - g_cameraP);
+                        float offX = filmX + (RandomBilateral() * g_camera.halfFilmPixelW);
+                        float offY = filmY + (RandomBilateral() * g_camera.halfFilmPixelH);
+                        filmP = g_camera.filmCenter + 
+                            (offX * g_camera.halfFilmWidth * g_camera.axisX) +
+                            (offY * g_camera.halfFilmHeight * g_camera.axisY);
+                        rayDirection = Normalize(filmP - g_camera.pos);
                         color = color + contrib * RayCast(&g_world, rayOrigin, rayDirection,0);
                     }
 #endif
@@ -640,18 +639,18 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
 
                     for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) { // integrate across image sensor.
                         
-                        float offX = filmX + (RandomBilateral() * g_halfPixW);
-                        float offY = filmY + (RandomBilateral() * g_halfPixH);
-                        v3 filmP = g_filmCenter + (offX * g_halfFilmW * g_cameraX) + (offY * g_halfFilmH * g_cameraY);
-                        v3 rayOrigin = g_cameraP;
-                        v3 rayDirection = Normalize(g_cameraP-filmP);
+                        float offX = filmX + (RandomBilateral() * g_camera.halfFilmPixelW);
+                        float offY = filmY + (RandomBilateral() * g_camera.halfFilmPixelH);
+                        v3 filmP = g_camera.filmCenter + (offX * g_camera.halfFilmWidth * g_camera.axisX) + (offY * g_camera.halfFilmHeight * g_camera.axisY);
+                        v3 rayOrigin = g_camera.pos;
+                        v3 rayDirection = Normalize(g_camera.pos-filmP);
 
                         // intersect with focal plane.
                         // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
                         // 1/f = 1/v + 1/b.
-                        float focalPlaneDist = 1.f/(1.f/FOCAL_LENGTH - 1.f/g_filmDist);
-                        v3 planePoint,N= g_cameraZ,focalPoint;
-                        planePoint = g_cameraP + g_cameraX + focalPlaneDist*N;
+                        float focalPlaneDist = 1.f/(1.f/FIXED_FOCAL_LENGTH - 1.f/g_camera.focalLength);
+                        v3 planePoint,N= g_camera.axisZ,focalPoint;
+                        planePoint = g_camera.pos + g_camera.axisX + focalPlaneDist*N;
                         float d = Dot(N,planePoint);
 
                         float t=RayIntersectPlane(rayOrigin, rayDirection, N, d, MIN_HIT_DISTANCE);
@@ -664,7 +663,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
 
                             v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
                             v3 rayOriginDisk,rayDirectionDisk;
-                            rayOriginDisk = rayOrigin + diskSample.x*LENS_RADIUS*g_cameraX + diskSample.y*LENS_RADIUS*g_cameraY;
+                            rayOriginDisk = rayOrigin + diskSample.x*g_camera.aperatureRadius*g_camera.axisX + diskSample.y*g_camera.aperatureRadius*g_camera.axisY;
                             rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
 
                             color = color + contrib * RayCast(&g_world, rayOriginDisk, rayDirectionDisk,0);
@@ -785,36 +784,10 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
     
-    LoadWorld(g_worldKind);
-
+    LoadWorld(g_worldKind,&g_camera);
     // define camera and characteristics
-    g_cameraP = V3(0, -10, 1); //  /* go back 10 and up 1 */ : V3(0, 10, 1); /* look down negative Z for physical camera */ 
-    g_cameraZ = (use_pinhole)? Normalize(g_cameraP) : -Normalize(g_cameraP);
-    g_cameraX = Normalize(Cross(V3(0,0,1), g_cameraZ));
-    g_cameraY = Normalize(Cross(g_cameraZ, g_cameraX));
-    if (g_image.width > g_image.height) {
-        g_filmH = g_filmW * (float)g_image.height / (float)g_image.width;
-    } else if (g_image.height > g_image.width) {
-        g_filmW = g_filmH * (float)g_image.width / (float)g_image.height;
-    }
-    if (!use_pinhole)
-        g_filmDist=1.f/(1.f/FOCAL_LENGTH-1.f/IMAGE_FOCAL_LENGTH);
-    g_halfFilmW = g_filmW / 2.0f;
-    g_halfFilmH = g_filmH / 2.0f;
-    g_filmCenter = g_cameraP - g_filmDist * g_cameraZ;
-    g_halfPixW = 1.0f / g_image.width;
-    g_halfPixH = 1.0f / g_image.height;
-    // print infos.
-    {
-        PlatformLoggerLog("camera located at (%f,%f,%f)\n", g_cameraP.x,g_cameraP.y,g_cameraP.z);
-        PlatformLoggerLog("g_cameraX: (%f,%f,%f)\n", g_cameraX.x,g_cameraX.y,g_cameraX.z);
-        PlatformLoggerLog("g_cameraY: (%f,%f,%f)\n", g_cameraY.x,g_cameraY.y,g_cameraY.z);
-        PlatformLoggerLog("g_cameraZ: (%f,%f,%f)\n", g_cameraZ.x,g_cameraZ.y,g_cameraZ.z);
-        PlatformLoggerLog(
-            "g_cameraX and Y define the plane where the image plane is embedded.\n"
-            "rays are shot originating from the g_cameraP and through the image plane(i.e. each pixel).\n"
-            "the camera has a local coordinate system which is different from the world coordinate system.\n");
-    }
+    DefineCamera(&g_camera);
+
     automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
     g_masterThreadHandle=CreateThread(
         nullptr,
@@ -1432,12 +1405,20 @@ float Lambda(v3 N, v3 s,float a){
 }
 
 
-void LoadWorld(world_kind_t kind)
+void LoadWorld(world_kind_t kind, camera_t *c)
 {
     light_t light;
     plane_t plane;
     material_t material;
     sphere_t sphere;
+
+    // init the camera params.
+    c->use_pinhole=g_use_pinhole;
+    c->pos=V3(0, -10, 1); // go back 10 and up 1.
+    c->fov=45.f;//degrees,obviously.
+    c->focalDistance=5.f;
+    c->aperatureRadius=0.035f;
+    c->target={};//origin of space,duh.
 
     material={};
     material.emitColor = V3(65/255.f,108/255.f,162/255.f);//sky.
@@ -1567,6 +1548,7 @@ void PrintHelp() {
            "\t6:\tMario N64 model.\n"
     );
     
+    printf("d                             - Enable depth of field via thin-lens approximation.\n");
     printf("n                             - Disable loading normal map textures.\n");
     printf("m                             - Disable loading metalness material textures.\n");
     printf("r                             - Disable loading roughness material textures.\n");
@@ -1582,6 +1564,7 @@ void ParseArgs() {
     g_bNormals=true;
     g_bMetalness=true;
     g_bRoughness=true;
+    g_use_pinhole=true;
 
     g_worldKind=WORLD_DEFAULT;
     
@@ -1613,9 +1596,59 @@ void ParseArgs() {
                     case 'w':
                         g_worldKind=(world_kind_t)max(0,min(WORLD_KIND_COUNT-1,atoi(argv[0])-1));
                         break;
+                    case 'd':
+                        g_use_pinhole=false;
+                        break;
                     default:
                         // nothing to see here, folks.
                         break;
                 }
             }
+}
+
+void DefineCamera(camera_t *c) {
+
+    // By this point, the "user set" parameters are:
+    // pos, use_pinhole, fov, focalDistance, aperatureRadius, and target.
+
+    c->axisZ = (c->use_pinhole)? Normalize(c->pos) : -Normalize(c->pos);
+    c->axisX = Normalize(Cross(V3(0,0,1), c->axisZ));
+    c->axisY = Normalize(Cross(c->axisZ, c->axisX));
+
+    if (!c->use_pinhole)
+        c->focalLength=1.f/(1.f/FIXED_FOCAL_LENGTH-1.f/c->focalDistance);
+    else
+        c->focalLength=FIXED_FOCAL_LENGTH;
+    
+    c->filmWidth=0.1f;
+    c->filmHeight=0.1f;
+    
+    //account for aspect ratio.
+    if (g_image.width > g_image.height) {
+        c->filmHeight = c->filmWidth * (float)g_image.height / (float)g_image.width;
+    } else if (g_image.height > g_image.width) {
+        c->filmWidth = c->filmHeight * (float)g_image.width / (float)g_image.height;
+    }
+
+    c->halfFilmWidth  = c->filmWidth / 2.0f;
+    c->halfFilmHeight = c->filmHeight / 2.0f;
+
+    c->filmCenter = c->pos - c->focalLength * c->axisZ;
+
+    // NOTE: This indeed looks odd at first glance. This is correct. Check the usage.
+    // Where it's used, we're working in a stretched film space by factor 2.
+    c->halfFilmPixelW = 1.0f / g_image.width;
+    c->halfFilmPixelH = 1.0f / g_image.height;
+
+    // print infos.
+    {
+        PlatformLoggerLog("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
+        PlatformLoggerLog("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
+        PlatformLoggerLog("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
+        PlatformLoggerLog("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
+        PlatformLoggerLog(
+        "c->axisX and Y define the plane where the film plane is embedded.\n"
+        "rays are shot originating from the film and through the lens located at c->pos.\n"
+        "the camera has a local coordinate system which is different from the world coordinate system.\n");
+    }
 }

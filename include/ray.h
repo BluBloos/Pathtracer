@@ -164,3 +164,17 @@ typedef enum world_kind {
     WORLD_SUN_TEMPLE,
     WORLD_KIND_COUNT
 } world_kind_t;
+
+// Vulkan-style API :)
+typedef struct camera {
+    float fov;
+    float focalLength;//physical camera property.
+    float focalDistance;//virtual image plane where the image is in focus.
+    float aperatureRadius;
+    bool use_pinhole;
+    // film plane properties.
+    float filmWidth, filmHeight, halfFilmWidth, halfFilmHeight, 
+        // a film pixel is the sizing of a pixel on the film surface.
+        halfFilmPixelW, halfFilmPixelH;
+    v3 pos,target,filmCenter,axisZ,axisX,axisY;
+} camera_t;
