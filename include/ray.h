@@ -156,7 +156,11 @@ typedef struct {
 
 typedef enum world_kind {
     WORLD_DEFAULT,
-    WORLD_BRDF_TEST,
+    WORLD_BRDF_TEST,//metal-roughness test.
+    WORLD_CORNELL_BOX,
+    WORLD_GLTF,
+    WORLD_RAYTRACING_ONE_WEEKEND,
     WORLD_MARIO,
-    WORLD_SUN_TEMPLE
+    WORLD_SUN_TEMPLE,
+    WORLD_KIND_COUNT
 } world_kind_t;

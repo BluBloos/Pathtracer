@@ -46,6 +46,8 @@ v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
 v3 SampleTexture(texture_t tex, v2 uv);
 v3 BespokeSampleTexture(texture_t tex, v2 uv);
 void LoadWorld(world_kind_t kind);
+void ParseArgs();
+void PrintHelp();
 
 float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
@@ -95,6 +97,7 @@ static int g_pp; // rays per pixel.
 static bool g_bNormals;
 static bool g_bMetalness;
 static bool g_bRoughness;
+static world_kind_t g_worldKind;
 
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
 extern int __argc;
@@ -547,42 +550,7 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
     ae::defaultWindowName = "Raytracer";
 
-    g_tc=MAX_THREAD_COUNT;
-    g_sc=8;
-    g_pp=4;
-
-    g_bNormals=true;
-    g_bMetalness=true;
-    g_bRoughness=true;
-
-    // process cmdline args.
-    for( char **argv=__argv; *argv; argv++ )
-        if ( *argv[0]=='-' )
-            for( char c; c=*((argv[0])++); ) {
-                switch( c ) {
-                    case 't':
-                        g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
-                        break;
-                    case 's':
-                        g_sc=max(0,min(RENDER_EQUATION_MAX_TAP_COUNT,atoi(argv[0])));
-                        break;
-                    case 'p':
-                        g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
-                        break;
-                    case 'n':
-                        g_bNormals=false;
-                        break;
-                    case 'm':
-                        g_bMetalness=false;
-                        break;
-                    case 'r':
-                        g_bRoughness=false;
-                        break;
-                    default:
-                        // nothing to see here, folks.
-                        break;
-                }
-            }
+    ParseArgs();
 }
 
 // NOTE(Noah): 
@@ -817,7 +785,7 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
     
-    LoadWorld(WORLD_DEFAULT);
+    LoadWorld(g_worldKind);
 
     // define camera and characteristics
     g_cameraP = V3(0, -10, 1); //  /* go back 10 and up 1 */ : V3(0, 10, 1); /* look down negative Z for physical camera */ 
@@ -1584,4 +1552,70 @@ void LoadWorld(world_kind_t kind)
     g_world.spheres = g_spheres;
     g_world.meshes = g_meshes;
     g_world.rtas = GenerateAccelerationStructure(&g_world);
+}
+
+void PrintHelp() {
+    printf("t<int>                        - Set the number of threads to use.\n");
+    printf("s<int>                        - Set the number of brdf sample points.\n");
+    printf("p<int>                        - Set the rays to shoot per pixel.\n");
+    printf("w<int>                        - Set the world number to load. Possible options:\n"
+           "\t1:\tDefault scene.\n"
+           "\t2:\tMetal-roughness test.\n"
+           "\t3:\tCornell box.\n"
+           "\t4:\tLoad GLTF scene.\n"
+           "\t5:\tRay Tracing in One Weekend book cover.\n"
+           "\t6:\tMario N64 model.\n"
+    );
+    
+    printf("n                             - Disable loading normal map textures.\n");
+    printf("m                             - Disable loading metalness material textures.\n");
+    printf("r                             - Disable loading roughness material textures.\n");
+    printf("h                             - Print this help menu.\n");
+    
+}
+
+void ParseArgs() {
+    g_tc=MAX_THREAD_COUNT;
+    g_sc=8;
+    g_pp=4;
+
+    g_bNormals=true;
+    g_bMetalness=true;
+    g_bRoughness=true;
+
+    g_worldKind=WORLD_DEFAULT;
+    
+    for( char **argv=__argv; *argv; argv++ )
+        if ( *argv[0]=='-' )
+            for( char c; c=*((argv[0])++); ) {
+                switch( c ) {
+                    case 't':
+                        g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
+                        break;
+                    case 's':
+                        g_sc=max(0,min(RENDER_EQUATION_MAX_TAP_COUNT,atoi(argv[0])));
+                        break;
+                    case 'p':
+                        g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
+                        break;
+                    case 'n':
+                        g_bNormals=false;
+                        break;
+                    case 'm':
+                        g_bMetalness=false;
+                        break;
+                    case 'r':
+                        g_bRoughness=false;
+                        break;
+                    case 'h':
+                        PrintHelp();
+                        break;
+                    case 'w':
+                        g_worldKind=(world_kind_t)max(0,min(WORLD_KIND_COUNT-1,atoi(argv[0])-1));
+                        break;
+                    default:
+                        // nothing to see here, folks.
+                        break;
+                }
+            }
 }
