@@ -183,7 +183,7 @@ static image_32_t AllocateImage(unsigned int width, unsigned int height) {
     return newImage;
 }
 
-static void WriteImage(image_32_t image, char *fileName, bool bFlip=false) {
+static void WriteImage(image_32_t image, const char *fileName, bool bFlip=false) {
     void *pixels;
     unsigned int outputPixelSize = GetTotalPixelSize(image);
     pixels = malloc(outputPixelSize);
@@ -197,7 +197,7 @@ static void WriteImage(image_32_t image, char *fileName, bool bFlip=false) {
     header.Height = image.height;
     header.Planes = 1;          
     header.BitsPerPixel = 32;    
-    FILE *fileHandle = fopen("test.bmp", "wb");
+    FILE *fileHandle = fopen(fileName, "wb");
     if(fileHandle) {
         fwrite(&header, sizeof(header), 1, fileHandle);
         if (bFlip) {
@@ -1423,13 +1423,8 @@ void LoadWorld(world_kind_t kind, camera_t *c)
     c->aperatureRadius=0.035f;
     c->target={};//origin of space,duh.
 
-    
-
     // sun directional light.
-    light={};
-    light.kind = LIGHT_KIND_DIRECTIONAL;
-    light.direction = Normalize(V3(1.f,1.f,-1.f));
-    light.radiance = 1.5f *V3(1.f,1.f,1.f); //g_materials[0].emitColor;
+    light={.kind = LIGHT_KIND_DIRECTIONAL, .direction = Normalize(V3(1.f,1.f,-1.f)), .radiance = 1.5f *V3(1.f,1.f,1.f)};
     nc_sbpush(g_lights,light);
     
     switch(kind) {
@@ -1437,80 +1432,39 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             AddSky(V3(65/255.f,108/255.f,162/255.f));
             nc_sbpush(g_planes,MakeGroundPlane());
 
-            // g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
-            material={};
-            material.albedoIdx=1;
-            material.metalnessIdx=2;
-            material.roughnessIdx=3;
-            material.normalIdx=4;
-            material.metalColor=V3(0.562f,0.565f,0.578f);//iron in air.
+            material={.albedoIdx=1,.metalnessIdx=2,.metalColor=V3(0.562f,0.565f,0.578f),.roughnessIdx=3,.normalIdx=4};
             nc_sbpush(g_materials,material);
             LoadBespokeTextures();
 
-            material={};
-            material.albedo = V3(0.7f, 0.25f, 0.3f);
-            // g_materials[2].ior=2.417f; // diamond.
-            material.roughness = 0.f;
+            material={.albedo = V3(0.7f, 0.25f, 0.3f),.roughness = 0.f};
             nc_sbpush(g_materials,material);
 
-            // g_materials[2].alpha=0.0f; // diamond.
-            material={};
-            material.albedo = V3(0.0f, 0.8f, 0.0f);
-            material.roughness = 0.0f;
-            material.ior=1.31f; // ice.   
-            nc_sbpush(g_materials,material); 
-
-            material={};
-            material.albedo = V3(0.3f, 0.25f, 0.7f);
-            material.ior=1.544f; // fused silica; a pure form of glass.
-            material.roughness = 0.2f;
+            material={.ior=1.31f,.albedo = V3(0.0f, 0.8f, 0.0f),.roughness = 0.0f,};
             nc_sbpush(g_materials,material);
 
-            sphere={};
-            sphere.p = V3(0,0,0);
-            sphere.r = 1.0f;
-            sphere.matIndex = 2;
+            material={.ior=1.544f,.albedo = V3(0.3f, 0.25f, 0.7f),.roughness=0.f};
+            nc_sbpush(g_materials,material);
+
+            sphere={.p = V3(0,0,0),.r = 1.0f,.matIndex = 2};
             nc_sbpush(g_spheres,sphere);
 
-            sphere={};
-            sphere.p = V3(-1,-5,0);
-            sphere.r = 1.0f;
-            sphere.matIndex = 4;
+            sphere={.p = V3(-1,-5,0),.r = 1.0f,.matIndex = 4};
             nc_sbpush(g_spheres,sphere);
 
-            sphere={};
-            sphere.p = V3(-2,0,2);
-            sphere.r = 1.0f;
-            sphere.matIndex = 3;
+            sphere={.p = V3(-2,0,2),.r = 1.0f,.matIndex = 3};
             nc_sbpush(g_spheres,sphere);
         }
             break;
-        // BRDF test is a WIP.
-#if 0
-        case WORLD_BRDF_TEST: {
-            // Generate an array of materials for debug purposes.
-            for (int i=0;i<10;i++)
-            for (int j=0;j<10;j++)
-            {
-                material={};
-                material.roughness=i/10.f;
-                material.metalness=j/10.f;
-                material.albedo = V3(0.8f, 0.8f, 0.0f);
-                nc_sbpush(g_materials,material); 
-
-                sphere={};
-                sphere.p = V3(-3.f+i/10.f*6.f,-5.f,2.f-j/10.f*2.f);
-                sphere.r = 0.1f;
-                sphere.matIndex = nc_sbcount(g_materials)-1;
-                nc_sbpush(g_spheres,sphere);
-            }
-        }
-            break;
-#endif
         case WORLD_MARIO: {
             AddSky(V3(65/255.f,108/255.f,162/255.f));
-            nc_sbpush(g_planes,MakeGroundPlane());
+
+            material={.albedo = V3(0.5f, 0.5f, 0.5f)};
+            nc_sbpush(g_materials, material);//ground material.
+            nc_sbpush(g_planes, MakeGroundPlane());
+
             LoadGltf();
+            g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
+
             { // generate debug g_materials for occtree voxels.
                 int s=1<<LEVELS;
                 for (int i=0;i<s;i++)
@@ -1522,9 +1476,8 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                     //g_materials[materialsBefore + i * s * s + j * s + k].roughness=1.f;
                 }
             }
-            g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
 
-            //adjust camera.
+            // adjust camera.
             c->target=V3(0,0,1);
             c->pos=V3(-5, -5, 1); // go back 10 and up 1.
             c->fov=30.f;
@@ -1538,14 +1491,11 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             AddSky(V3(1.f,1.f,1.f));
 
             //make the ground plane.
-            int ground_material=nc_sbcount(g_materials);
-            material={};
-            material.albedo = V3(0.5f, 0.5f, 0.5f);
+            unsigned int ground_material=nc_sbcount(g_materials);
+            material={.albedo = V3(0.5f, 0.5f, 0.5f)};
             nc_sbpush(g_materials,material);
-            sphere={};
-            sphere.p = V3(0,0,-1000);
-            sphere.r = 1000;
-            sphere.matIndex = ground_material;
+
+            sphere={.p = V3(0,0,-1000),.r = 1000,.matIndex = ground_material};
             nc_sbpush(g_spheres,sphere);
 
             for (int a = -11; a < 11; a++) {
@@ -1554,20 +1504,21 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                     v3 center=V3(a + 0.9*RandomUnilateral(), b + 0.9*RandomUnilateral(), 0.2);
 
                     if (Magnitude(center - V3(4, 0, 0.2)) > 0.9) {
-                        material={};
-                        int newMat=nc_sbcount(g_materials);
-                        material.albedo = Hadamard( RandomV3(),RandomV3() );
+                        unsigned int newMat=nc_sbcount(g_materials);
                         
                         if (choose_mat < 0.8) {
                             // diffuse
+                            material={.albedo = Hadamard( RandomV3(),RandomV3() )};
                             nc_sbpush(g_materials,material);
                         } else 
-                        //if (choose_mat < 0.95) 
+                        //if (choose_mat < 0.95)
                         {
                             // metal
-                            material.metalColor =  0.5f*RandomV3()+V3(0.5f,0.5f,0.5f); // map to 0.5 -> 1 range.
-                            material.metalness  = RandomUnilateral();
-                            nc_sbpush(g_materials,material);
+                            material={
+                                .metalness  = RandomUnilateral(),
+                                .metalColor =  0.5f*RandomV3()+V3(0.5f,0.5f,0.5f),                                
+                                .roughness = 1.f-material.metalness};
+                            nc_sbpush(g_materials, material);
                         }
                         // we'll get the glass in later.
                         /*else {
@@ -1575,10 +1526,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                             sphere_material = make_shared<dielectric>(1.5);
                         }*/
 
-                        sphere={};
-                        sphere.p = center;
-                        sphere.r = 0.2f;
-                        sphere.matIndex = newMat;
+                        sphere={.p = center,.r = 0.2f,.matIndex = newMat};
                         nc_sbpush(g_spheres,sphere);
                     }
                 }
@@ -1589,32 +1537,22 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             world.add(make_shared<sphere>(point3(0, 1, 0), 1.0, material1));
             */
 
-            material={};
-            int material2=nc_sbcount(g_materials);
-            material.albedo=V3(0.4, 0.2, 0.1);
+            unsigned int material2=nc_sbcount(g_materials);
+            material={.albedo=V3(0.4, 0.2, 0.1)};
             nc_sbpush(g_materials,material);
-            sphere={};
-            sphere.p = V3(-4, 0, 1);
-            sphere.r = 1.f;
-            sphere.matIndex = material2;
+            sphere={.p = V3(-4, 0, 1),.r = 1.f,.matIndex = material2};
             nc_sbpush(g_spheres,sphere);
 
-            material={};
-            int material3=nc_sbcount(g_materials);
-            material.metalColor=V3(0.7, 0.6, 0.5);
-            material.metalness=1.f;
+            unsigned int material3=nc_sbcount(g_materials);
+            material={.metalness=1.f,.metalColor=V3(0.7, 0.6, 0.5),.roughness=0.f};
             nc_sbpush(g_materials,material);
-            sphere={};
-            sphere.p = V3(4, 0, 1);
-            sphere.r = 1.f;
-            sphere.matIndex = material3;
+            sphere={.p = V3(4, 0, 1),.r = 1.f,.matIndex = material3};
             nc_sbpush(g_spheres,sphere);
 
+            //adjust camera.
             //cam.samples_per_pixel = 500;
             //cam.max_depth         = 50;
             //cam.defocus_angle = 0.6;
-
-            //adjust camera.
             c->target=V3(0,0,0);
             c->pos = V3(13,3,2);
             c->fov=20.f;
@@ -1632,17 +1570,14 @@ void LoadWorld(world_kind_t kind, camera_t *c)
 }
 
 void AddSky(v3 color){
-    material_t material={};
-    material.emitColor = color;//sky.
+    material_t material={.emitColor = color};
     nc_sbpush(g_materials,material);
 }
 
 plane_t MakeGroundPlane(){
     // ground plane.
-    plane_t plane={};
-    plane.n = V3(0,0,1);
-    plane.d = 0; // plane on origin
-    plane.matIndex = 1;
+    plane_t plane={.n = V3(0,0,1),.d = 0, // plane on origin
+        .matIndex = 1};
     return plane;
 }
 
@@ -1683,32 +1618,23 @@ void ParseArgs() {
         if ( *argv[0]=='-' )
             for( char c; c=*((argv[0])++); ) {
                 switch( c ) {
-                    case 't':
-                        g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
+                    case 't': g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
                         break;
-                    case 's':
-                        g_sc=max(0,min(RENDER_EQUATION_MAX_TAP_COUNT,atoi(argv[0])));
+                    case 's': g_sc=max(0,min(RENDER_EQUATION_MAX_TAP_COUNT,atoi(argv[0])));
                         break;
-                    case 'p':
-                        g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
+                    case 'p': g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
                         break;
-                    case 'n':
-                        g_bNormals=false;
+                    case 'n': g_bNormals=false;
                         break;
-                    case 'm':
-                        g_bMetalness=false;
+                    case 'm': g_bMetalness=false;
                         break;
-                    case 'r':
-                        g_bRoughness=false;
+                    case 'r': g_bRoughness=false;
                         break;
-                    case 'h':
-                        PrintHelp();
+                    case 'h': PrintHelp();
                         break;
-                    case 'w':
-                        g_worldKind=(world_kind_t)max(0,min(WORLD_KIND_COUNT-1,atoi(argv[0])-1));
+                    case 'w': g_worldKind=(world_kind_t)max(0,min(WORLD_KIND_COUNT-1,atoi(argv[0])-1));
                         break;
-                    case 'd':
-                        g_use_pinhole=false;
+                    case 'd': g_use_pinhole=false;
                         break;
                     default:
                         // nothing to see here, folks.
