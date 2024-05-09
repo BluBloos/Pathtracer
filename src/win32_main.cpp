@@ -1508,6 +1508,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             nc_sbpush(g_spheres,sphere);
         }
             break;
+        // try to roughly match: https://cdn-images-1.medium.com/v2/resize:fit:800/1*IBg4O5MyKVmwyA2DhoBBVA.jpeg.
         case WORLD_BRDF_TEST: {
             AddSky(V3(65/255.f,108/255.f,162/255.f));
 
@@ -1515,10 +1516,10 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             nc_sbpush(g_materials, material);//ground material.
             nc_sbpush(g_planes, MakeGroundPlane());
 
-            for (int i=0;i<10;i++)
-            for (int j=0;j<10;j++) {
+            for (int i=0;i<11;i++)
+            for (int j=0;j<11;j++) {
                 unsigned int newMat=nc_sbcount(g_materials);
-                v3 center = V3(i/10.f*5.f, j/10.f*5.f, 0.2);
+                v3 center = V3(i/2.f, j/2.f, 0.2);
                 v3 color = V3(1.0f,0.782f,0.344f);
                 material={.albedo = color, .metalness=i/10.f, .metalColor=color,
                     .roughness=j/10.f};
@@ -1527,11 +1528,11 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                 nc_sbpush(g_spheres,sphere);
             }
 
-            c->target=V3(2,2,0);
-            c->pos = V3(2,6,2);
+            c->target=V3(2.5,2.5,0);
+            c->pos = V3(2.5,7,2);
             c->fov=50.f;
             c->focalDistance=10.f;
-        } 
+        }
             break;
         case WORLD_MARIO: {
             AddSky(V3(65/255.f,108/255.f,162/255.f));
