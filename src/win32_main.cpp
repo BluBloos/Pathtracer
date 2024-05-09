@@ -243,15 +243,13 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         float c = Dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
             - sphere.r * sphere.r;
         float denom = 2.0f * a;
-        float rootTerm = SquareRoot(b * b - 4.0f * a * c);
+        float discriminant = b * b - 4.0f * a * c;
+        if (discriminant<0.f)continue;
+        float rootTerm = SquareRoot(discriminant);
         if (rootTerm > tolerance){
-            // NOTE(Noah): The denominator can never be zero
-            float tp = (-b + rootTerm) / denom;
+            // NOTE(Noah): The denominator can never be zero, since we always have a valid direction.
             float tn = (-b - rootTerm) / denom;   
-            float t = tp;
-            if ((tn > minHitDistance) && (tn < tp)){
-                t = tn;
-            }
+            float t = tn;
             if ((t > minHitDistance) && (t < hitDistance)) {
                 hitDistance = t;
                 hitMatIndex = sphere.matIndex;
