@@ -248,7 +248,9 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         float rootTerm = SquareRoot(discriminant);
         if (rootTerm > tolerance){
             // NOTE(Noah): The denominator can never be zero, since we always have a valid direction.
-            float tn = (-b - rootTerm) / denom;   
+            //also note that despite two roots, we don't need to check which is closer. the minus rootTerm
+            //will always be closer, since rootTerm is positive.
+            float tn = (-b - rootTerm) / denom;
             float t = tn;
             if ((t > minHitDistance) && (t < hitDistance)) {
                 hitDistance = t;
