@@ -1493,10 +1493,10 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             material={.albedo = V3(0.7f, 0.25f, 0.3f),.roughness = 0.f};
             nc_sbpush(g_materials,material);
 
-            material={.ior=1.31f,.albedo = V3(0.0f, 0.8f, 0.0f),.roughness = 0.0f,};
+            material={.albedo = V3(0.0f, 0.8f, 0.0f),.roughness = 0.0f,};
             nc_sbpush(g_materials,material);
 
-            material={.ior=1.544f,.albedo = V3(0.3f, 0.25f, 0.7f),.roughness=0.f};
+            material={.albedo = V3(0.3f, 0.25f, 0.7f),.roughness=0.f};
             nc_sbpush(g_materials,material);
 
             sphere={.p = V3(0,0,0),.r = 1.0f,.matIndex = 2};
