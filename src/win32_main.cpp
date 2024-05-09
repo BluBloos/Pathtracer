@@ -503,7 +503,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         }
 
         // use monte carlo estimator for the diffuse lobe.
-        for (int i=0;i<tapCount;)
+        for (int i=0;i<tapCount;i++)
         {
             float px;
 
@@ -517,7 +517,6 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
 
             if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
             {
-                i++;//rejection sampling.
                 assert(cosTheta>0.f);
 
                 ks_local = SchlickMetal(F0,NdotL,metalness,mat.metalColor);
