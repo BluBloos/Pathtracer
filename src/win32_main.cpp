@@ -50,6 +50,8 @@ void LoadWorld(world_kind_t kind,camera_t *c);
 void ParseArgs();
 void PrintHelp();
 void DefineCamera(camera_t *c);
+v3 RandomCosineDirectionHemisphere();
+v3 RandomDirectionHemisphere();
 
 float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
@@ -474,29 +476,19 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 L=pureBounce;
                 px=100.f; //the probability distribution for a perfectly smooth surface is a dirac delta.
                 //i++
+                NdotL=Dot(N, L);
             } else {
-                theta = RandomUnilateral()*2.f*PI;
-            
-                // if it has a roughness value of 1, then we would want the gaussian to sort of "fold" around the entire upper hemisphere.
-                // that will be PI/2.f radians.
-                // the confidence interval idea with the gaussian states that 95 % of the values exist within
-                // 2 standard deviations: https://www.mathsisfun.com/data/standard-normal-distribution.html.
-                float stddev=mat.roughness*PI/4.f;
-                phi   = max(min(randX=RandomNormal(stddev), (PI/2.f)), -(PI/2.f));
-                px=Gaussian(randX,stddev);
-                assert( px>0.f );//verify sane properties about the gaussian function.
-
-                x = sin(phi) * cos(theta);
-                y = sin(phi) * sin(theta);
-                z = cos(phi);
-                v3 lobeBounce = Normalize(x*tangentX+y*tangentY+z*N);
+                
+                v3 rDir=RandomCosineDirectionHemisphere();
+                v3 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
                 L = lobeBounce;
-            }
+                px=(NdotL=Dot(N, L))/PI;
+            }            
 
             halfVector =(1.f/Magnitude(L+V)) * (L+V);
             cosTheta=Dot(halfVector,L);
 
-            if ((NdotL=Dot(N, L))>0.f&&(Dot(halfVector,V)>0.f)&&cosTheta>0.f)//incoming light is in hemisphere.
+            if ((NdotL)>0.f&&(Dot(halfVector,V)>0.f)&&cosTheta>0.f)//incoming light is in hemisphere.
             {
                 //i++;
                 ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
@@ -513,14 +505,12 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         // use monte carlo estimator for the diffuse lobe.
         for (int i=0;i<tapCount;)
         {
-            float theta,phi,x,y,z;
-            theta = RandomUnilateral()*2.f*PI;
-            phi   = acos(z=(1.f-RandomUnilateral()/**0.5f*2.f*/));
-            x = sin(phi) * cos(theta);
-            y = sin(phi) * sin(theta);
-            //z = cos(phi);
-            v3 lobeBounce = Normalize(x*tangentX+y*tangentY+z*N);
+            float px;
+
+            v3 rDir=RandomCosineDirectionHemisphere();
+            v3 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
             L = lobeBounce;
+            px = 1.f/PI;
 
             halfVector =(1.f/Magnitude(L+V)) * (L+V);
             cosTheta=Dot(halfVector,L);
@@ -536,8 +526,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
                 brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin));
 
-                radiance += (2.f * PI) *
-                    tapContrib * NdotL * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);//tapContrib dissapear due to 1/p(x) term in general importance sampling equation.
+                // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
+                radiance += (1.f/px) * tapContrib * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
             }
         } // END spawning the bounce rays.
 
@@ -1752,4 +1742,27 @@ void DefineCamera(camera_t *c) {
         "rays are shot originating from the film and through the lens located at c->pos.\n"
         "the camera has a local coordinate system which is different from the world coordinate system.\n");
     }
+}
+
+// from https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html
+// p(dir)=cos(theta)/PI.
+v3 RandomCosineDirectionHemisphere(){
+    float r1 = RandomUnilateral();
+    float r2 = RandomUnilateral();
+
+    float phi = 2.f*PI*r1;
+    float x = cos(phi)*sqrt(r2);
+    float y = sin(phi)*sqrt(r2);
+    float z = sqrt(1.f-r2);
+
+    return V3(x, y, z);
+}
+
+v3 RandomDirectionHemisphere(){
+    float theta,phi,x,y,z;
+    theta = RandomUnilateral()*2.f*PI;
+    phi   = acos(z=(1.f-RandomUnilateral()/**0.5f*2.f*/));
+    x = sin(phi) * cos(theta);
+    y = sin(phi) * sin(theta);
+    return V3(x,y,z);
 }
