@@ -45,6 +45,7 @@ v3 brdf_diff(material_t &mat,v3 surfPt);
 v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
 v3 SampleTexture(texture_t tex, v2 uv);
 v3 BespokeSampleTexture(texture_t tex, v2 uv);
+bool EffectivelySmooth(float roughness);
 void LoadWorld(world_kind_t kind,camera_t *c);
 void ParseArgs();
 void PrintHelp();
@@ -378,7 +379,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         F0 = Square((N_AIR-mat.ior)/(N_AIR+mat.ior)); // NOTE: need to change when support refraction again.
 
         int tapCount = g_sc;
-        float tapContrib = 1.f / float(tapCount + world->lightCount);
+        //float tapContrib = 1.f / float(tapCount + nc_sbcount(world->lights));
+        float tapContrib=1.f/tapCount;
 
         rayOrigin = rayOrigin + hitDistance * rayDirection;
         pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
@@ -409,6 +411,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
 
         if (Dot(N, V)<=0.f) break;
 
+#if 0
         // cast the shadow ray(s).
         for (unsigned int i=0;i< nc_sbcount(world->lights);i++) {
             light_t &light=world->lights[i];
@@ -432,7 +435,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
             halfVector =(1.f/Magnitude(L+V)) * (L+V);
             cosTheta=Dot(halfVector,L);
 
-            if ((NdotL=Dot(N, L))>0.f && attenuation>0.f) {
+            if ((NdotL=Dot(N, L))>0.f && (Dot(halfVector,V)>0.f) && cosTheta>0.f && attenuation>0.f) {
                 assert(cosTheta>=0.f);
                 ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
                 kd_local=V3(1.f,1.f,1.f)-ks_local;
@@ -447,9 +450,55 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     radiance += NdotL * Hadamard( attenuation*light.radiance, brdfTerm );//correct coeff for importance sampling, i.e. inclusion of 1/p(x) term.
                 }
             }
+        } // END cast the shadow rays.
+#endif
+
+        // use monte carlo estimator for the specular lobe.
+        for (int i=0;i<tapCount;i++)
+        {
+            float theta,phi,x,y,z,randX,px;
+
+            if (EffectivelySmooth(mat.roughness)) {
+                L=pureBounce;
+                px=100.f; //the probability distribution for a perfectly smooth surface is a dirac delta.
+                //i++
+            } else {
+                theta = RandomUnilateral()*2.f*PI;
+            
+                // if it has a roughness value of 1, then we would want the gaussian to sort of "fold" around the entire upper hemisphere.
+                // that will be PI/2.f radians.
+                // the confidence interval idea with the gaussian states that 95 % of the values exist within
+                // 2 standard deviations: https://www.mathsisfun.com/data/standard-normal-distribution.html.
+                float stddev=mat.roughness*PI/4.f;
+                phi   = max(min(randX=RandomNormal(stddev), (PI/2.f)), -(PI/2.f));
+                px=Gaussian(randX,stddev);
+                assert( px>0.f );//verify sane properties about the gaussian function.
+
+                x = sin(phi) * cos(theta);
+                y = sin(phi) * sin(theta);
+                z = cos(phi);
+                v3 lobeBounce = Normalize(V3(x,y,z));
+                L = lobeBounce;
+            }
+
+            halfVector =(1.f/Magnitude(L+V)) * (L+V);
+            cosTheta=Dot(halfVector,L);
+
+            if ((NdotL=Dot(N, L))>0.f&&(Dot(halfVector,V)>0.f)&&cosTheta>0.f)//incoming light is in hemisphere.
+            {
+                //i++;
+                ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
+                kd_local=V3(1.f,1.f,1.f)-ks_local;
+                for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
+                kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
+                brdfTerm = Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ) );
+
+                radiance += tapContrib * 
+                    (1.f/px) * NdotL * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
+            }
         }
 
-        // spawn the new rays.
+        // use monte carlo estimator for the diffuse lobe.
         for (int i=0;i<tapCount;)
         {
             float theta,phi,x,y,z;
@@ -458,9 +507,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
             x = sin(phi) * cos(theta);
             y = sin(phi) * sin(theta);
             //z = cos(phi);
-
             v3 lobeBounce = Normalize(V3(x,y,z));
-            //L = Normalize(Lerp(pureBounce, randomBounce, 0.f));
             L = lobeBounce;
 
             halfVector =(1.f/Magnitude(L+V)) * (L+V);
@@ -471,16 +518,16 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 i++;//rejection sampling.
                 assert(cosTheta>0.f);
 
-                ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
+                ks_local = SchlickMetal(F0,NdotL,metalness,mat.metalColor);
                 kd_local=V3(1.f,1.f,1.f)-ks_local;
                 for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
                 kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
-                brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin))+
-                    Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ));
+                brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin));
 
-                radiance += tapContrib * NdotL * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
+                radiance += (2.f * PI) *
+                    tapContrib * NdotL * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);//tapContrib dissapear due to 1/p(x) term in general importance sampling equation.
             }
-        } // END FOR.
+        } // END spawning the bounce rays.
 
         // How to think about the refraction ray?
         // it doesn't really have anything to do with the BRDF.
@@ -491,13 +538,13 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         // material.
         
         // coming up through a transparent surface
-        // with the reflection ray calculated as 'Iout' above.  The blend
+        // with the reflection ray calculated as 'Iout' above. The blend
         // should be 'opacity' of the reflected ray and '1-opacity' of the
         // refracted ray.
 
         // disable refraction for now.
 #if 0
-        if (mat.alpha < 1.0f) { // not completely opaque
+        if (mat.alpha < 1.0f) { // not completely opaque.
 
             v3 refractionDirection;
             if (FindRefractionDirection(rayDirection, nextNormal, mat.ior, refractionDirection))
@@ -1397,13 +1444,18 @@ float MaskingShadowing(v3 normal, v3 L, v3 V, v3 H, float roughness){
     float a     = roughness*roughness ;//Burley parameterization(Disney principled shading model).
     a=max(MIN_ALPHA_FROM_ROUGHNESS,a);// don't let roughness go to zero!
     float Lambda(v3 N, v3 s,float a);
-    if (Dot(H,V)<=0.f) return 0.f;
+    //if (Dot(H,V)<=0.f) return 0.f;
     return 1.f/(1.f+Lambda(normal,V,a)+Lambda(normal,L,a));
 }
 float Lambda(v3 N, v3 s,float a){
     return 0.5f*((a/Dot(N,s))-1.f);
 }
 
+bool EffectivelySmooth(float roughness){
+    float a     = roughness*roughness ;//Burley parameterization(Disney principled shading model).
+    if (a<MIN_ALPHA_FROM_ROUGHNESS)return true;
+    return false;
+}
 
 void LoadWorld(world_kind_t kind, camera_t *c)
 {
