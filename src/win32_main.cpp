@@ -1519,7 +1519,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             for (int i=0;i<11;i++)
             for (int j=0;j<11;j++) {
                 unsigned int newMat=nc_sbcount(g_materials);
-                v3 center = V3(i/2.f, j/2.f, 0.2);
+                v3 center = V3(i/2.f, 11/2.f-j/2.f, 0.2);
                 v3 color = V3(1.0f,0.782f,0.344f);
                 material={.albedo = color, .metalness=i/10.f, .metalColor=color,
                     .roughness=j/10.f};
