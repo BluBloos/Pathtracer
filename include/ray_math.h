@@ -252,6 +252,11 @@ inline float RandomBilateral() {
     float result = 2.0f * RandomUnilateral() - 1.0f;
     return result;
 }
+
+inline v3 RandomV3(){
+    return V3(RandomUnilateral(),RandomUnilateral(),RandomUnilateral());
+}
+
 inline float Gaussian(float x, float roughness){
     float a=roughness;
     float result = 1.f / (a/SQRT_2/SQRT_PI) * powf( EULER_NUMBER , -1.f*(x*x)/(2.f*a*a));

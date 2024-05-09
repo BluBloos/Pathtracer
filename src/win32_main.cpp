@@ -1407,6 +1407,9 @@ float Lambda(v3 N, v3 s,float a){
 
 void LoadWorld(world_kind_t kind, camera_t *c)
 {
+    plane_t MakeGroundPlane();
+    void AddSky(v3 color);
+
     light_t light;
     plane_t plane;
     material_t material;
@@ -1420,9 +1423,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
     c->aperatureRadius=0.035f;
     c->target={};//origin of space,duh.
 
-    material={};
-    material.emitColor = V3(65/255.f,108/255.f,162/255.f);//sky.
-    nc_sbpush(g_materials,material);
+    
 
     // sun directional light.
     light={};
@@ -1430,16 +1431,12 @@ void LoadWorld(world_kind_t kind, camera_t *c)
     light.direction = Normalize(V3(1.f,1.f,-1.f));
     light.radiance = 1.5f *V3(1.f,1.f,1.f); //g_materials[0].emitColor;
     nc_sbpush(g_lights,light);
-
-    // ground plane.
-    plane={};
-    plane.n = V3(0,0,1);
-    plane.d = 0; // plane on origin
-    plane.matIndex = 1;
-    nc_sbpush(g_planes,plane);
-
+    
     switch(kind) {
         case WORLD_DEFAULT: {
+            AddSky(V3(65/255.f,108/255.f,162/255.f));
+            nc_sbpush(g_planes,MakeGroundPlane());
+
             // g_materials[1].albedo = V3(0.5f, 0.5f, 0.5f);
             material={};
             material.albedoIdx=1;
@@ -1488,6 +1485,8 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             nc_sbpush(g_spheres,sphere);
         }
             break;
+        // BRDF test is a WIP.
+#if 0
         case WORLD_BRDF_TEST: {
             // Generate an array of materials for debug purposes.
             for (int i=0;i<10;i++)
@@ -1507,7 +1506,10 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             }
         }
             break;
+#endif
         case WORLD_MARIO: {
+            AddSky(V3(65/255.f,108/255.f,162/255.f));
+            nc_sbpush(g_planes,MakeGroundPlane());
             LoadGltf();
             { // generate debug g_materials for occtree voxels.
                 int s=1<<LEVELS;
@@ -1528,8 +1530,97 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             c->fov=30.f;
         }
             break;
-        case WORLD_SUN_TEMPLE:
-            break;
+        case WORLD_RAYTRACING_ONE_WEEKEND: {
+
+            // NOTE: I copied the code from https://raytracing.github.io/books/RayTracingInOneWeekend.html#wherenext?/afinalrender
+            // and adapted it. some variable names therefore do not follow the same convention as the rest of the codebase.
+
+            AddSky(V3(1.f,1.f,1.f));
+
+            //make the ground plane.
+            int ground_material=nc_sbcount(g_materials);
+            material={};
+            material.albedo = V3(0.5f, 0.5f, 0.5f);
+            nc_sbpush(g_materials,material);
+            sphere={};
+            sphere.p = V3(0,0,-1000);
+            sphere.r = 1000;
+            sphere.matIndex = ground_material;
+            nc_sbpush(g_spheres,sphere);
+
+            for (int a = -11; a < 11; a++) {
+                for (int b = -11; b < 11; b++) {
+                    float choose_mat = RandomUnilateral();
+                    v3 center=V3(a + 0.9*RandomUnilateral(), b + 0.9*RandomUnilateral(), 0.2);
+
+                    if (Magnitude(center - V3(4, 0, 0.2)) > 0.9) {
+                        material={};
+                        int newMat=nc_sbcount(g_materials);
+                        material.albedo = Hadamard( RandomV3(),RandomV3() );
+                        
+                        if (choose_mat < 0.8) {
+                            // diffuse
+                            nc_sbpush(g_materials,material);
+                        } else 
+                        //if (choose_mat < 0.95) 
+                        {
+                            // metal
+                            material.metalColor =  0.5f*RandomV3()+V3(0.5f,0.5f,0.5f); // map to 0.5 -> 1 range.
+                            material.metalness  = RandomUnilateral();
+                            nc_sbpush(g_materials,material);
+                        }
+                        // we'll get the glass in later.
+                        /*else {
+                            // glass
+                            sphere_material = make_shared<dielectric>(1.5);
+                        }*/
+
+                        sphere={};
+                        sphere.p = center;
+                        sphere.r = 0.2f;
+                        sphere.matIndex = newMat;
+                        nc_sbpush(g_spheres,sphere);
+                    }
+                }
+            }
+
+            /*
+            auto material1 = make_shared<dielectric>(1.5);
+            world.add(make_shared<sphere>(point3(0, 1, 0), 1.0, material1));
+            */
+
+            material={};
+            int material2=nc_sbcount(g_materials);
+            material.albedo=V3(0.4, 0.2, 0.1);
+            nc_sbpush(g_materials,material);
+            sphere={};
+            sphere.p = V3(-4, 0, 1);
+            sphere.r = 1.f;
+            sphere.matIndex = material2;
+            nc_sbpush(g_spheres,sphere);
+
+            material={};
+            int material3=nc_sbcount(g_materials);
+            material.metalColor=V3(0.7, 0.6, 0.5);
+            material.metalness=1.f;
+            nc_sbpush(g_materials,material);
+            sphere={};
+            sphere.p = V3(4, 0, 1);
+            sphere.r = 1.f;
+            sphere.matIndex = material3;
+            nc_sbpush(g_spheres,sphere);
+
+            //cam.samples_per_pixel = 500;
+            //cam.max_depth         = 50;
+            //cam.defocus_angle = 0.6;
+
+            //adjust camera.
+            c->target=V3(0,0,0);
+            c->pos = V3(13,3,2);
+            c->fov=20.f;
+            c->focalDistance=10.f;
+        }
+        break;
     }
 
     g_world.lights = g_lights;
@@ -1538,6 +1629,21 @@ void LoadWorld(world_kind_t kind, camera_t *c)
     g_world.spheres = g_spheres;
     g_world.meshes = g_meshes;
     g_world.rtas = GenerateAccelerationStructure(&g_world);
+}
+
+void AddSky(v3 color){
+    material_t material={};
+    material.emitColor = color;//sky.
+    nc_sbpush(g_materials,material);
+}
+
+plane_t MakeGroundPlane(){
+    // ground plane.
+    plane_t plane={};
+    plane.n = V3(0,0,1);
+    plane.d = 0; // plane on origin
+    plane.matIndex = 1;
+    return plane;
 }
 
 void PrintHelp() {
