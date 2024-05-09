@@ -371,7 +371,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     if (hitMatIndex) {
 
         float cosTheta,NdotL,NdotV,F0,metalness;
-        v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3;
+        v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY;
 
         cosTheta=(Dot(nextNormal, rayDirection));
         cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
@@ -396,7 +396,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 metalness=mat.metalness;
             } else {
                 texture_t tex=g_textures[mat.metalnessIdx-1];
-                r3 = BespokeSampleTexture(tex, uv );
+                r3 = BespokeSampleTexture( tex, uv );
                 metalness=r3.x;
             }
         }
@@ -410,6 +410,18 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         }
 
         if (Dot(N, V)<=0.f) break;
+
+        // Define the local tangent space using the normal.
+        // I haven't tested this code,could be wrong. but even if it's wrong,output is likely
+        // to still be correct. we don't yet support anisotropic materials and all the PDF functions
+        // are isotropic.
+        if (N.z==0.f){
+            tangentY = Normalize(Cross(N, V3(0,1,0)));
+            tangentX = Normalize(Cross(tangentY,N));
+        }else{
+            tangentX = Normalize(Cross(V3(0,1,0), N));
+            tangentY = Normalize(Cross(N, tangentX));
+        }
 
 #if 0
         // cast the shadow ray(s).
@@ -477,7 +489,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 x = sin(phi) * cos(theta);
                 y = sin(phi) * sin(theta);
                 z = cos(phi);
-                v3 lobeBounce = Normalize(V3(x,y,z));
+                v3 lobeBounce = Normalize(x*tangentX+y*tangentY+z*N);
                 L = lobeBounce;
             }
 
@@ -507,7 +519,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
             x = sin(phi) * cos(theta);
             y = sin(phi) * sin(theta);
             //z = cos(phi);
-            v3 lobeBounce = Normalize(V3(x,y,z));
+            v3 lobeBounce = Normalize(x*tangentX+y*tangentY+z*N);
             L = lobeBounce;
 
             halfVector =(1.f/Magnitude(L+V)) * (L+V);
