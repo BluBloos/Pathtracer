@@ -363,48 +363,6 @@ float RayIntersectPlanarShape(v3 rayOrigin, v3 rayDirection, float minHit, const
     return minHit;
 }
 
-static float RayIntersectTri(v3 rayOrigin, v3 rayDirection, float minHit, v3 &A, v3 &B, v3 &C, v3 &N) {
-    // Locate the plane that the points are on.
-    // Find the point of the ray on the plane.
-    // Compute the barycentric coordinates of the plane point.
-    // check that they all add to 1 and are all positive, if so, we're in the triangle.
-
-    float d = Dot(A, N);
-
-    float t=RayIntersectPlane(rayOrigin,rayDirection,N,d, minHit);
-    if(t!=minHit) {
-
-        v3 x = rayOrigin + t*rayDirection;
-        v3 a = B-A;
-        v3 b = C-A;
-
-        m2 mat;
-        {
-        float e,f,g,h;
-        e = Dot(a,a);
-        f = g = Dot(b,a);
-        h = Dot(b,b);
-        mat.a = {e,f};
-        mat.b = {g,h};
-        }
-
-        m2 matInv;
-        if (0!=Inverse(mat,&matInv)) return minHit;
-
-        v2 alphaBetaVector, xHat;
-        xHat = { Dot(a,x-A), Dot(b,x-A) };
-        alphaBetaVector = matInv * xHat;
-
-        bool bInTri=alphaBetaVector.x>=0.f&&alphaBetaVector.y>=0.f&&(1.f-alphaBetaVector.x-alphaBetaVector.y)>=0.f;
-        if (bInTri) {
-            return t;
-        }       
-    }
-
-    return minHit;
-}
-
-
 // NOTE: This was stolen from the Atomation source code.
 //
 /* How it works:

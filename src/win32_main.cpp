@@ -311,11 +311,12 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
                 {
                     int triIndex = r->triangles[i];
                     v3 *points = &mesh.points[triIndex*3];
-                    v3 A=points[0];
-                    v3 B=points[1];
-                    v3 C=points[2];
-                    v3 n = Normalize( Cross( B-A, C-A ) );
-                    float t=RayIntersectTri(rayOrigin, rayDirection, minHitDistance, A,B,C, n);
+                    v3 A,B,C,u,v;
+                    A=points[0];
+                    B=points[1];
+                    C=points[2];
+                    v3 n = Normalize( Cross( u=B-A, v=C-A ) );
+                    float t=RayIntersectPlanarShape<PLANAR_TRIANGLE>(rayOrigin, rayDirection, minHitDistance, A, u, v);
                     // hit.
                     if ((t > minHitDistance) && (t < hitDistance)) {
                         hitDistance = t;
@@ -1081,7 +1082,7 @@ void LoadGltf()
                                     Mat.albedo.y=metalrough->base_color_factor[1];
                                     Mat.albedo.z=metalrough->base_color_factor[2];
                                     nc_sbpush(g_materials, Mat);
-                                    matIdx = nc_sbcount(g_materials); - 1;
+                                    matIdx = nc_sbcount(g_materials) - 1;
                                 }
                             }
 
