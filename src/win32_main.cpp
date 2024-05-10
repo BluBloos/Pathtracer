@@ -1598,7 +1598,7 @@ float GGX(v3 N, v3 H, float roughness)
 
 // presented at GDC!
 float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness){
-    float a2=roughness*roughness;
+    float a2     = roughness*roughness*roughness*roughness;
     // we know that both NdotV and NdotL are positive and nonzero!
     float NdotV=Dot(N,V);
     float NdotL=Dot(N,L);
