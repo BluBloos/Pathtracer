@@ -3,5 +3,6 @@
         "random": "cpp",
         "xlocale": "cpp",
         "memory": "cpp"
-    }
+    },
+    "C_Cpp.errorSquiggles": "disabled"
 }

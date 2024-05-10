@@ -1677,8 +1677,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
         }
             break;
         case WORLD_CORNELL_BOX: {
-            // AddSky(V3(0.f,0.f,0.f));
-            AddSky(V3(65/255.f,108/255.f,162/255.f));
+            AddSky(V3(0.f,0.f,0.f));
 
             unsigned int red   = nc_sbcount(g_materials);
             material={.albedo=(V3(.65, .05, .05))};
@@ -1689,8 +1688,10 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             unsigned int green = nc_sbcount(g_materials);
             material={.albedo=(V3(.12, .45, .15))};
             nc_sbpush(g_materials,material);
-            //unsigned int light = nc_sbcount(g_materials);
-            //make_shared<diffuse_light>(V3(15, 15, 15));
+            unsigned int light = nc_sbcount(g_materials);
+            material={.albedo=V3(0,0,0)/*black body radiation source*/,
+                .emitColor=V3(15.f,15.f,15.f)};
+            nc_sbpush(g_materials,material);
 
             quad={.point=V3(555,0,0),.u=V3(0,0,555), .v=V3(0,555,0), .matIndex=green};
             nc_sbpush(g_quads,quad);
@@ -1698,7 +1699,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             quad={.point=V3(0,0,0),.u=  V3(0,0,555),.v= V3(0,555,0), .matIndex=red};
             nc_sbpush(g_quads,quad);
 
-            quad={.point=V3(0,0,0),.u= V3(555,0,0),.v=  V3(0,555,0),.matIndex= white};
+            quad={.point=V3(343,332,554),.u=V3(-130,0,0),.v=V3(0,-105,0),.matIndex= light};
             nc_sbpush(g_quads,quad);
 
             // cornell floor.
@@ -1707,6 +1708,10 @@ void LoadWorld(world_kind_t kind, camera_t *c)
 
             // back face wall.
             quad={.point=V3(0,555,0),.u=V3(555,0,0),.v=V3(0,0,555)  ,.matIndex= white};
+            nc_sbpush(g_quads,quad);
+
+            // therefore the ceiling.
+            quad={.point=V3(0,0,0),.u= V3(555,0,0),.v=  V3(0,555,0),.matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // cam.aspect_ratio      = 1.0;
