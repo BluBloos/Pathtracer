@@ -158,10 +158,10 @@ typedef enum world_kind {
     WORLD_DEFAULT,
     WORLD_BRDF_TEST,//metal-roughness test.
     WORLD_CORNELL_BOX,
-    WORLD_GLTF,
+    // WORLD_GLTF, /* we cannot support just yet due to required advancements in acceleration structure */
     WORLD_RAYTRACING_ONE_WEEKEND,
     WORLD_MARIO,
-    WORLD_SUN_TEMPLE,
+    // WORLD_SUN_TEMPLE, /* we cannot support just yet due to required advancements in acceleration structure */
     WORLD_KIND_COUNT
 } world_kind_t;
 
