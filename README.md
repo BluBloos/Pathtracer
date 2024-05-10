@@ -15,21 +15,29 @@ looking for a coding adventure :)
 # Features
 
 - Importance sampling Monte Carlo Integration.
-- Specular BSDF from microfacet theory: GGX distribution function, Smith joint
-  shadow-masking, and Slick approximation of Fresnel equations.
-- Uniform diffuse BSDF.
+- Materials:
+  - Specular BSDF from microfacet theory: GGX distribution function, Smith joint
+  shadow-masking courtesy of Hammon et al., and Slick approximation of Fresnel equations.
+  - Uniform diffuse BSDF.
+  - Albedo, roughness, metalness, and normal textures.
+  - Disney "principled" roughness parameterization.
 - Physical lens model.
 - GLTF import.
-- Directional and point lights.
-- Supported Geometry: Triangles, Spheres, Planes, and AABBs.
-- PBR material support.
+- Surface (area) and Directional lights.
+- Supported Geometry: Triangles, Spheres, Planes, AABBs, Quads.
 - Multithreaded architecture.
 - Live viewer.
+- Output .BMP image format.
 
 # References
 
 - https://www.pbr-book.org/4ed/Monte_Carlo_Integration, among other chapters maybe.
-- I own a physical copy of https://www.realtimerendering.com/; I sampled various chapters.
+- I own a physical copy of https://www.realtimerendering.com/; I sampled various
+  chapters, primarly chapter 9.
+- I read the entire series to ensure completeness of my implementation:
+  - [_Ray Tracing in One Weekend_](https://raytracing.github.io/books/RayTracingInOneWeekend.html)
+  - [_Ray Tracing: The Next Week_](https://raytracing.github.io/books/RayTracingTheNextWeek.html)
+  - [_Ray Tracing: The Rest of Your Life_](https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html)
 
 # Steps for Building
 
