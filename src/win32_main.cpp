@@ -54,6 +54,7 @@ void PrintHelp();
 void DefineCamera(camera_t *c);
 v3 RandomCosineDirectionHemisphere();
 v3 RandomDirectionHemisphere();
+void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
 
 float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
@@ -436,23 +437,7 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
         if (Dot(N, V)<=0.f) break;
 
         // Define the local tangent space using the normal.
-        if (N.z==0.f) {
-            if (N.y == 1.f || N.y == -1.f) {
-                tangentX = Normalize(Cross(N, V3(0, 0, 1)));
-                tangentY = N;
-                N = Normalize(Cross(tangentX, tangentY));
-            }
-            else {
-                // normal acts as X.
-                tangentX = N;
-                tangentY = Normalize(Cross(V3(0, 0, 1), tangentX));
-                N = Normalize(Cross(tangentX, tangentY));
-            }
-        }else {
-            // normal acts as Z.
-            tangentX = Normalize(Cross(V3(0,1,0), N));
-            tangentY = Normalize(Cross(N, tangentX));
-        }
+        BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &N );
 
         // use monte carlo estimator.
         // for (int i=0;i<tapCount;i++).
@@ -2017,4 +2002,23 @@ v3 RandomDirectionHemisphere(){
     x = sin(phi) * cos(theta);
     y = sin(phi) * sin(theta);
     return V3(x,y,z);
+}
+
+void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c){
+    // NOTE that: X x Y  = Z;
+    //            Y x Z  = X;
+    //            Z x X  = Y;
+    //            Z x Y  = -X;
+    //            Z x -X = -Y;
+ 
+    // original code from: https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#orthonormalbases.
+    // I haven't analyzed this code precisely, but from a cursory read it feels like it won't work for anistropic pdf's.
+    v3 unit_w = Normalize(w);
+    bool bWIsGlobalX=fabs(unit_w.x) > 0.9;
+    v3 A = (bWIsGlobalX) ? V3(0,1,0) : V3(1,0,0);
+    v3 v = Normalize(Cross(unit_w, A));
+    v3 u = Cross(unit_w, v);
+    *a = u;//x
+    *b = v;//y
+    *c = unit_w;//z
 }
