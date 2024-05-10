@@ -1784,6 +1784,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             //cam.samples_per_pixel = 500;
             //cam.max_depth         = 50;
             //cam.defocus_angle = 0.6;
+            c->use_pinhole=false;
             c->target=V3(0,0,0);
             c->pos = V3(13,3,2);
             c->fov=20.f;
