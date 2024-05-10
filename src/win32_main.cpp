@@ -14,26 +14,20 @@
 #define NC_DS_IMPLEMENTATION
 #include "nc_ds.h"
 
-#define USE_STRATIFIED_SAMPLING 1
 #define DEBUG_MIDDLE_PIXEL 0
 
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
 #define RAYS_PER_PIXEL_MAX 1000              // for antialiasing.
-#define RENDER_EQUATION_MAX_TAP_COUNT 16
 #define MIN_HIT_DISTANCE float(1e-5)
-
 #define WORLD_SIZE 5.0f
 #define LEVELS 6
-
 #define N_AIR 1.003f
-
-// fix f
 #define FIXED_FOCAL_LENGTH 0.098f
+#define MIN_ROUGHNESS float(0.01f)
 
 static v3 TonemapPass(v3 pixel);
-static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
 static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth);
 static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
 void visualizer(game_memory_t *gameMemory);
@@ -57,9 +51,7 @@ v3 RandomDirectionHemisphere();
 void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
 mipchain_t GenerateMipmapChain(texture_t tex);
 
-float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
-float MaskingShadowing(v3 normal, v3 L, v3 V, v3 H, float roughness);
 float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
 float GGX(v3 N, v3 H, float roughness);
 
@@ -72,23 +64,11 @@ static sphere_t *g_spheres = {};
 static quad_t *g_quads = {};
 static mesh_t *g_meshes = {};
 static aabb_t *g_aabbs = {};
-
 static mipchain_t g_textures[4]={};
-
-void AddDynamicMaterial(material_t mat)
-{
-    nc_sbpush(g_materials, mat);
-}
-
-int MaterialsCount()
-{
-    return nc_sbcount(g_materials);
-}
-
 image_32_t g_image = {};
-
 static world_kind_t g_worldKind;
 static HANDLE g_masterThreadHandle;
+
 static int g_tc; // thread count.
 static int g_sc; // sample count (render equation tap count).
 static int g_pp; // sqrt(rays per pixel).
@@ -509,216 +489,6 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
     return radiance;
 }
 
-static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
-{
-    float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
-    v3 rayOrigin, rayDirection;
-
-    v3 radiance = {};
-    if (depth>=MAX_BOUNCE_COUNT) return radiance;
-
-    rayOrigin=o;
-    rayDirection=d;
-
-    ray_payload_t p;
-    float &hitDistance = p.hitDistance;
-    unsigned int &hitMatIndex = p.hitMatIndex;
-    v3 &nextNormal = p.normal;
-    p=RayCastIntersect(world, rayOrigin, rayDirection);
-      
-    material_t mat = world->materials[hitMatIndex];
-    do {
-    if (hitMatIndex) {
-
-        float cosTheta,NdotL,NdotV,F0,metalness;
-        v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY;
-
-        cosTheta=(Dot(nextNormal, rayDirection));
-        cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
-
-        F0 = Square((N_AIR-mat.ior)/(N_AIR+mat.ior)); // NOTE: need to change when support refraction again.
-
-        int tapCount = g_sc;
-        //float tapContrib = 1.f / float(tapCount + nc_sbcount(world->lights));
-        float tapContrib=1.f/tapCount;
-
-        rayOrigin = rayOrigin + hitDistance * rayDirection;
-        pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
-
-        N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
-        V=-rayDirection;
-
-        // Via the material mapping (might be UVs or some other function), sample the texture.
-        v2 uv = {rayOrigin.x,rayOrigin.y};//for now.
-
-        { // find the metalness.
-            if (mat.metalnessIdx==0 || !g_bMetalness) {
-                metalness=mat.metalness;
-            } else {
-                texture_t tex=g_textures[mat.metalnessIdx-1];
-                r3 = BespokeSampleTexture( tex, uv );
-                metalness=r3.x;
-            }
-        }
-
-        // find the normal.
-        if (g_bNormals && mat.normalIdx!=0){
-            texture_t tex=g_textures[mat.normalIdx-1];
-            N = BespokeSampleTexture(tex, uv );
-            // NOTE: this currently only works for the ground plane, since it's normal happens to be up!
-            N = Normalize(2.f*N - V3(1.f,1.f,1.f));
-        }
-
-        if (Dot(N, V)<=0.f) break;
-
-        // Define the local tangent space using the normal.
-        // I haven't tested this code,could be wrong. but even if it's wrong,output is likely
-        // to still be correct. we don't yet support anisotropic materials and all the PDF functions
-        // are isotropic.
-        if (N.z==0.f){
-            tangentY = Normalize(Cross(N, V3(0,1,0)));
-            tangentX = Normalize(Cross(tangentY,N));
-        }else{
-            tangentX = Normalize(Cross(V3(0,1,0), N));
-            tangentY = Normalize(Cross(N, tangentX));
-        }
-
-#if 0
-        // cast the shadow ray(s).
-        for (unsigned int i=0;i< nc_sbcount(world->lights);i++) {
-            light_t &light=world->lights[i];
-            float hitThreshold=FLT_MAX,attenuation=1.f;
-            switch(light.kind){
-                case LIGHT_KIND_DIRECTIONAL:
-                {
-                    L=-1.f*light.direction;
-                } break;
-                case LIGHT_KIND_POINT:
-                {
-                    L=light.position-rayOrigin;
-                    hitThreshold=Magnitude(L);
-                    L=(1.f/hitThreshold)*L;//normalize.
-                    attenuation=powf(2.7f,-0.1f*hitThreshold);
-                } break;
-                case LIGHT_KIND_TRIANGLE:
-                break;
-            }
-
-            halfVector =(1.f/Magnitude(L+V)) * (L+V);
-            cosTheta=Dot(halfVector,L);
-
-            if ((NdotL=Dot(N, L))>0.f && (Dot(halfVector,V)>0.f) && cosTheta>0.f && attenuation>0.f) {
-                assert(cosTheta>=0.f);
-                ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
-                kd_local=V3(1.f,1.f,1.f)-ks_local;
-                for (int i = 0;i < 3;i++) assert(ks_local.E[i] >= 0.f && ks_local.E[i] <= 1.f);
-                kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
-                brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin))+
-                    Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ));
-
-                auto payload=RayCastIntersect(world,rayOrigin,L);
-                if (payload.hitMatIndex==0 || (payload.hitDistance>hitThreshold&&payload.hitDistance>minHitDistance) ) {
-                    //radiance += tapContrib * NdotL * Hadamard( attenuation*light.radiance, brdfTerm );
-                    radiance += NdotL * Hadamard( attenuation*light.radiance, brdfTerm );//correct coeff for importance sampling, i.e. inclusion of 1/p(x) term.
-                }
-            }
-        } // END cast the shadow rays.
-#endif
-
-        // use monte carlo estimator for the specular lobe.
-        for (int i=0;i<tapCount;i++)
-        {
-            float theta,phi,x,y,z,randX,px;
-
-            if (EffectivelySmooth(mat.roughness)) {
-                L=pureBounce;
-                px=100.f; //the probability distribution for a perfectly smooth surface is a dirac delta.
-                //i++
-                NdotL=Dot(N, L);
-            } else {
-                
-                v3 rDir=RandomCosineDirectionHemisphere();
-                v3 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
-                L = lobeBounce;
-                px=(NdotL=Dot(N, L))/PI;
-            }            
-
-            halfVector =(1.f/Magnitude(L+V)) * (L+V);
-            cosTheta=Dot(halfVector,L);
-
-            if ((NdotL)>0.f&&(Dot(halfVector,V)>0.f)&&cosTheta>0.f)//incoming light is in hemisphere.
-            {
-                //i++;
-                ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
-                kd_local=V3(1.f,1.f,1.f)-ks_local;
-                for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
-                kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
-                brdfTerm = Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ) );
-
-                radiance += tapContrib * 
-                    (1.f/px) * NdotL * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
-            }
-        }
-
-        // use monte carlo estimator for the diffuse lobe.
-        for (int i=0;i<tapCount;i++)
-        {
-            float px;
-
-            v3 rDir=RandomCosineDirectionHemisphere();
-            v3 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
-            L = lobeBounce;
-            px = 1.f/PI;
-
-            halfVector =(1.f/Magnitude(L+V)) * (L+V);
-            cosTheta=Dot(halfVector,L);
-
-            if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
-            {
-                assert(cosTheta>0.f);
-
-                ks_local = SchlickMetal(F0,NdotL,metalness,mat.metalColor);
-                kd_local=V3(1.f,1.f,1.f)-ks_local;
-                for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
-                kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
-                brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin));
-
-                // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
-                radiance += (1.f/px) * tapContrib * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
-            }
-        } // END spawning the bounce rays.
-
-        // How to think about the refraction ray?
-        // it doesn't really have anything to do with the BRDF.
-        // it's simply where we continue along the same ray path,
-        // but there's a bend in the path along the way (due to the interface).
-        // and we treat the geometry as "participating media", where
-        // there is some absorption when transporting through a translucent
-        // material.
-        
-        // coming up through a transparent surface
-        // with the reflection ray calculated as 'Iout' above. The blend
-        // should be 'opacity' of the reflected ray and '1-opacity' of the
-        // refracted ray.
-
-        // disable refraction for now.
-#if 0
-        if (mat.alpha < 1.0f) { // not completely opaque.
-
-            v3 refractionDirection;
-            if (FindRefractionDirection(rayDirection, nextNormal, mat.ior, refractionDirection))
-                radiance += kd*(1.f-mat.alpha) * RayCast(world, rayOrigin, refractionDirection, depth);
-        }
-#endif
-
-    } // END IF.
-    } while(false);
-
-    radiance += mat.emitColor;
-
-    return radiance;
-}
-
 // TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
 // or is this something that we can fix on the engine side?
 void visualizer(game_memory_t *gameMemory) {
@@ -787,7 +557,6 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                     float contrib;
                     v3 rayDirection,filmP,rayOrigin = g_camera.pos;
 
-#if USE_STRATIFIED_SAMPLING
                     contrib = 1.0f / (float)g_pp / (float)g_pp;
                     for (int i = 0;i < g_pp;i++) {
                         for (int j = 0;j < g_pp;j++) {
@@ -810,20 +579,6 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             color = color + contrib * RayCastFast(&g_world, rayOrigin, rayDirection,0);
                         }
                     }
-#else
-                    // NOTE: this path is now not tested,after the camera refactor.
-                    contrib = 1.0f / (float)g_pp;
-                    for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) {
-                        float offX = filmX + (RandomBilateral() * g_camera.halfFilmPixelW);
-                        float offY = filmY + (RandomBilateral() * g_camera.halfFilmPixelH);
-                        filmP = g_camera.filmCenter + 
-                            (offX * g_camera.halfFilmWidth * g_camera.axisX) +
-                            (offY * g_camera.halfFilmHeight * g_camera.axisY);
-                        rayDirection = Normalize(filmP - g_camera.pos);
-                        color = color + contrib * RayCastFast(&g_world, rayOrigin, rayDirection,0);
-                    }
-#endif
-
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
                 {
                     float contrib = 1.0f / (float)g_pp/(float)g_pp;
@@ -1325,8 +1080,8 @@ void LoadGltf()
                                     Mat.albedo.x=metalrough->base_color_factor[0];
                                     Mat.albedo.y=metalrough->base_color_factor[1];
                                     Mat.albedo.z=metalrough->base_color_factor[2];
-                                    AddDynamicMaterial(Mat);// NOTE: we don't care about duplicates.
-                                    matIdx = MaterialsCount() - 1;
+                                    nc_sbpush(g_materials, Mat);
+                                    matIdx = nc_sbcount(g_materials); - 1;
                                 }
                             }
 
@@ -1440,13 +1195,7 @@ v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H)
         roughness=r3.x;
     }
 
-    v3 spec=
-        /*HammonMaskingShadowing()**
-        SchlickMetal(float F0, float cosTheta, metalness, 
-            mat.metalColor //for now.
-        );*/
-        GGX(normal, H, roughness)*
-        //MaskingShadowing(normal, L, V, H, roughness)*
+    v3 spec= GGX(normal, H, roughness)*
         HammonMaskingShadowing(normal, L, V, roughness)*
         (0.25f/fabsf(Dot(normal,L))/fabsf(Dot(normal,V)))*
         V3(1.f,1.f,1.f);
@@ -1589,12 +1338,6 @@ v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor) {
     return vF0 + powf(1.f-cosTheta,5.f)*(V3(1.f,1.f,1.f)-vF0);
 }
 
-float Schlick(float F0, float cosTheta) {
-    return F0+(1.f-F0)*powf(1.f-cosTheta,5.f);
-}
-
-#define MIN_ROUGHNESS float(0.01f)
-
 float GGX(v3 N, v3 H, float roughness)
 {
     float a2     = roughness*roughness*roughness*roughness;
@@ -1618,17 +1361,6 @@ float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness){
     float numerator = 2.f*NdotL*NdotV;
     float denom=NdotV * sqrt(a2 + (1.f-a2)*NdotL*NdotL) + NdotL * sqrt(a2 + (1-a2)*NdotV*NdotV);
     return numerator/denom;
-}
-
-float MaskingShadowing(v3 normal, v3 L, v3 V, v3 H, float roughness){
-    float a     = roughness*roughness ;//Burley parameterization(Disney principled shading model).
-    a=max(MIN_ALPHA_FROM_ROUGHNESS,a);// don't let roughness go to zero!
-    float Lambda(v3 N, v3 s,float a);
-    //if (Dot(H,V)<=0.f) return 0.f;
-    return 1.f/(1.f+Lambda(normal,V,a)+Lambda(normal,L,a));
-}
-float Lambda(v3 N, v3 s,float a){
-    return 0.5f*((a/Dot(N,s))-1.f);
 }
 
 bool EffectivelySmooth(float roughness){
@@ -1920,9 +1652,8 @@ void PrintHelp() {
            "\t1:\tDefault scene.\n"
            "\t2:\tMetal-roughness test.\n"
            "\t3:\tCornell box.\n"
-           "\t4:\tLoad GLTF scene.\n"
-           "\t5:\tRay Tracing in One Weekend book cover.\n"
-           "\t6:\tMario N64 model.\n"
+           "\t4:\tRay Tracing in One Weekend book cover.\n"
+           "\t5:\tMario N64 model.\n"
     );
     
     printf("d                             - Enable depth of field via thin-lens approximation.\n");
@@ -1950,8 +1681,6 @@ void ParseArgs() {
             for( char c; c=*((argv[0])++); ) {
                 switch( c ) {
                     case 't': g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
-                        break;
-                    case 's': g_sc=max(0,min(RENDER_EQUATION_MAX_TAP_COUNT,atoi(argv[0])));
                         break;
                     case 'p': g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
                         break;
@@ -2033,15 +1762,6 @@ v3 RandomCosineDirectionHemisphere(){
     float z = sqrt(1.f-r2);
 
     return V3(x, y, z);
-}
-
-v3 RandomDirectionHemisphere(){
-    float theta,phi,x,y,z;
-    theta = RandomUnilateral()*2.f*PI;
-    phi   = acos(z=(1.f-RandomUnilateral()/**0.5f*2.f*/));
-    x = sin(phi) * cos(theta);
-    y = sin(phi) * sin(theta);
-    return V3(x,y,z);
 }
 
 void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c){
