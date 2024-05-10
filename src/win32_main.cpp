@@ -119,12 +119,11 @@ X render proper orientation at runtime.
 / Add cmdline processing.
     X thread count.
     - output image filepath; dynamically find extension and output based on that.
-    - allow for disable DOF.
-- usage/help print if supply -h.
+    X allow for disable DOF.
+X usage/help print if supply -h.
 - use stb_image_write to support .PNG and .JPG.
 RENDERING FEATURES:
-/ tonemapping from HDR to 0->1 range.
-    - do more than a cursory read of https://64.github.io/tonemapping/ and integrate real camera response.
+X tonemapping from HDR to 0->1 range.
 / add light sources: directional, point, area.
     X directional.
     X point.
@@ -139,44 +138,46 @@ RENDERING FEATURES:
     - load materials with textures.
 X add rendering of triangle geometry.
 / accelerate triangle geometry rendering via occtree.
-/ approximate the rendering equation.
-    - uniform sampling in hemisphere.
-    / proper implementation of a BRDF model (GGX).
-    - specular antialiasing:
-        - despite shaky theory, can use Toksvig equation.
+X approximate the rendering equation.
+    X uniform sampling in hemisphere.
+    X proper implementation of a BRDF model (GGX).
 / refraction
     - different wavelengths refract differently.
 / textures for PBR materials.
     X diffuse.
     - bump map.
-    - roughness.
-    - metalness.
+    / normal map.
+        - support normal maps applied to surface where the normal is not pointing directly up.
+    X roughness.
+    X metalness.
     - mipmapping.
 X diffuse and specular interaction with surfaces via fresnel equations.
-- subsurface scattering.
 / physical camera modelling (e.g. lens).
     X depth of field
     - exposure
-- antialiasing:
-    - use statified sampling.
+X use statified sampling.
 - accelerate and improve quality with denoising.
-- importance sampling.
-- add early ray termintation via russian roulette.
+/ importance sampling.
+    X cosine sample the unit hemisphere.
+- add early ray termination via russian roulette.
 PERFORMANCE:
 - Use compute shaders.
 - "Some threads finish all their texels, while others are still working" - we are wasting potential good work!
    We need the master thread to notice and assign those lazy threads more work.
-- SIMD?
+- vector instructions -> SIMD.
 */
 
 /*
 FUTURE WORK:
+- do more than a cursory read of https://64.github.io/tonemapping/ and integrate real camera response.
+- subsurface scattering models to support e.g. skin.
 - add support for anisotropic BRDFs (would allow for rendering e.g. brushed metal).
 - support very rough metals via multiple bounce surface reflection in the BRDF; currently such surfaces (and others?)
   rendered via current system are too dark.
 - add BRDF models for cloth.
 - add support for materials with nanogeometry , where geometric optics model breaks down (e.g. thin films).
 - there's a whole can of worms when it comes to specular antialiasing. Open it!
+    - despite shaky theory, can use Toksvig equation.
 */
 
 static unsigned int GetTotalPixelSize(image_32_t image) {
