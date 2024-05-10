@@ -1642,7 +1642,9 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             material={.albedo = V3(0.7f, 0.25f, 0.3f),.roughness = 0.f};
             nc_sbpush(g_materials,material);
 
-            material={.albedo = V3(0.0f, 0.8f, 0.0f),.roughness = 0.0f,};
+            material={.albedo = V3(0.0f, 0.8f, 0.0f),.metalness=0.8f,
+                .metalColor=V3(0.562f,0.565f,0.578f),
+                .roughness = 0.0f,};
             nc_sbpush(g_materials,material);
 
             material={.albedo = V3(0.3f, 0.25f, 0.7f),.roughness=0.f};
