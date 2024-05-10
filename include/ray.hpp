@@ -1,4 +1,4 @@
-#include "ray_math.h"
+#include "ray_math.hpp"
 
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof(array[0]))
 
@@ -92,6 +92,13 @@ typedef struct {
 } plane_t;
 
 typedef struct {
+    v3 point;
+    v3 u;
+    v3 v;
+    unsigned int matIndex;
+} quad_t;
+
+typedef struct {
     v3 p;
     float r;
     unsigned int matIndex;
@@ -148,6 +155,7 @@ typedef struct {
     light_t *lights;
     material_t *materials;
     plane_t *planes;
+    quad_t *quads;
     sphere_t *spheres;
     aabb_t *aabbs;
     mesh_t *meshes;

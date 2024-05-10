@@ -333,6 +333,36 @@ static float Square(float a) {
     return a*a;
 }
 
+constexpr int PLANAR_TRIANGLE=0;
+constexpr int PLANAR_QUAD=1;
+
+// Reference: https://raytracing.github.io/books/RayTracingTheNextWeek.html#quadrilaterals
+template<int IntersectionKind>
+float RayIntersectPlanarShape(v3 rayOrigin, v3 rayDirection, float minHit, const v3 &A, const v3 &u, const v3 &v){
+    // Locate the plane that the points are on.
+    // Find the point of the ray on the plane.
+    // Compute the parameterized coordinates of the plane point.
+    // check that they are in bounds. if so, we're in the planar object.
+    v3 N = Cross(u,v);
+    v3 Nunit=Normalize(N);
+    float d = Dot(A, Nunit);
+    float t=RayIntersectPlane(rayOrigin,rayDirection,Nunit,d, minHit);
+    if(t!=minHit) {
+        float alpha,beta;
+        v3 p = rayOrigin + t*rayDirection - A;
+        v3 w = (1.f/Dot(N,N)) * N;
+        alpha=Dot(w,(Cross(p,v)));
+        beta=Dot(w,(Cross(u,p)));
+        switch(IntersectionKind){
+            case PLANAR_TRIANGLE: if (alpha>=0.f&&beta>=0.f&&(alpha+beta)<=1.f) return t;
+            break;
+            case PLANAR_QUAD: if (alpha>=0.f&&alpha<=1.f&&beta>=0.f&&beta<=1.f)  return t;
+            break;
+        }
+    }
+    return minHit;
+}
+
 static float RayIntersectTri(v3 rayOrigin, v3 rayDirection, float minHit, v3 &A, v3 &B, v3 &C, v3 &N) {
     // Locate the plane that the points are on.
     // Find the point of the ray on the plane.

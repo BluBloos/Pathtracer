@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "ray.h"
+#include "ray.hpp"
 #include <automata_engine.h>
 #include <windows.h>
 #include <gist/github/nc_stretchy_buffers.h>
@@ -15,6 +15,7 @@
 #include "nc_ds.h"
 
 #define USE_STRATIFIED_SAMPLING 1
+#define DEBUG_MIDDLE_PIXEL 0
 
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
@@ -66,6 +67,7 @@ static material_t *g_materials;
 static light_t *g_lights = {};
 static plane_t *g_planes = {};
 static sphere_t *g_spheres = {};
+static quad_t *g_quads = {};
 static mesh_t *g_meshes = {};
 static aabb_t *g_aabbs = {};
 
@@ -101,7 +103,8 @@ extern char ** __argv;
 
 /*
 Hierarchy of work:
-- features and correctness first.
+- features first with verification by looking at images.
+- verify correctness more rigorously (tests). 
 - then performance.
 - then code readability and simpleness.
 */
@@ -265,6 +268,23 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         }
     }
 
+    // quad intersection test.
+    for (
+        unsigned int quadIndex = 0;
+        quadIndex < nc_sbcount(world->quads);
+        quadIndex++
+    ) {
+        quad_t quad = world->quads[quadIndex];
+        v3 N=Normalize(Cross(quad.u,quad.v));
+
+        float t=RayIntersectPlanarShape<PLANAR_QUAD>(rayOrigin, rayDirection, minHitDistance, quad.point, quad.u, quad.v);
+        if ((t > minHitDistance) && (t < hitDistance)) {
+            hitDistance = t;
+            hitMatIndex = quad.matIndex;
+            nextNormal = N;
+        }
+    }
+
     // floor intersection test.
     for (
         unsigned int planeIndex = 0;
@@ -416,13 +436,20 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
         if (Dot(N, V)<=0.f) break;
 
         // Define the local tangent space using the normal.
-        // I haven't tested this code,could be wrong. but even if it's wrong,output is likely
-        // to still be correct. we don't yet support anisotropic materials and all the PDF functions
-        // are isotropic.
-        if (N.z==0.f){
-            tangentY = Normalize(Cross(N, V3(0,1,0)));
-            tangentX = Normalize(Cross(tangentY,N));
-        }else{
+        if (N.z==0.f) {
+            if (N.y == 1.f || N.y == -1.f) {
+                tangentX = Normalize(Cross(N, V3(0, 0, 1)));
+                tangentY = N;
+                N = Normalize(Cross(tangentX, tangentY));
+            }
+            else {
+                // normal acts as X.
+                tangentX = N;
+                tangentY = Normalize(Cross(V3(0, 0, 1), tangentX));
+                N = Normalize(Cross(tangentX, tangentY));
+            }
+        }else {
+            // normal acts as Z.
             tangentX = Normalize(Cross(V3(0,1,0), N));
             tangentY = Normalize(Cross(N, tangentX));
         }
@@ -757,6 +784,10 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
 
                 v3 color = {};
 
+#if DEBUG_MIDDLE_PIXEL
+                if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) continue;
+#endif
+
                 if ( g_camera.use_pinhole ) {
                     
                     float contrib;
@@ -778,7 +809,6 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             xStep += (RandomUnilateral() - 0.5f) * stepX;
                             yStep += (RandomUnilateral() - 0.5f) * stepY;
 
-                            //vec3 dir = (llCorner + xStep * right + yStep * up).normalize();
                             filmP = g_camera.filmCenter + 
                                 ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
                                 ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
@@ -1617,6 +1647,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
     plane_t plane;
     material_t material;
     sphere_t sphere;
+    quad_t quad;
 
     // init the camera params.
     c->use_pinhole=g_use_pinhole;
@@ -1660,6 +1691,48 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             nc_sbpush(g_spheres,sphere);
         }
             break;
+        case WORLD_CORNELL_BOX: {
+            // AddSky(V3(0.f,0.f,0.f));
+            AddSky(V3(65/255.f,108/255.f,162/255.f));
+
+            unsigned int red   = nc_sbcount(g_materials);
+            material={.albedo=(V3(.65, .05, .05))};
+            nc_sbpush(g_materials,material);
+            unsigned int white = nc_sbcount(g_materials);
+            material={.albedo=(V3(.73, .73, .73))};
+            nc_sbpush(g_materials,material);
+            unsigned int green = nc_sbcount(g_materials);
+            material={.albedo=(V3(.12, .45, .15))};
+            nc_sbpush(g_materials,material);
+            //unsigned int light = nc_sbcount(g_materials);
+            //make_shared<diffuse_light>(V3(15, 15, 15));
+
+            quad={.point=V3(555,0,0),.u=V3(0,0,555), .v=V3(0,555,0), .matIndex=green};
+            nc_sbpush(g_quads,quad);
+
+            quad={.point=V3(0,0,0),.u=  V3(0,0,555),.v= V3(0,555,0), .matIndex=red};
+            nc_sbpush(g_quads,quad);
+
+            quad={.point=V3(0,0,0),.u= V3(555,0,0),.v=  V3(0,555,0),.matIndex= white};
+            nc_sbpush(g_quads,quad);
+
+            // cornell floor.
+            quad={.point=V3(555,555,555),.u= V3(-555,0,0), .v=V3(0,-555,0),.matIndex= white};
+            nc_sbpush(g_quads,quad);
+
+            // back face wall.
+            quad={.point=V3(0,555,0),.u=V3(555,0,0),.v=V3(0,0,555)  ,.matIndex= white};
+            nc_sbpush(g_quads,quad);
+
+            // cam.aspect_ratio      = 1.0;
+            // cam.image_width       = 600;
+            //cam.samples_per_pixel = 200;
+            //cam.max_depth         = 50;
+            c->fov =40;
+            c->pos = V3(278, -800, 278 );
+            c->target   = V3(278, 0, 278);
+            // cam.defocus_angle = 0;
+        } break;
         // try to roughly match: https://cdn-images-1.medium.com/v2/resize:fit:800/1*IBg4O5MyKVmwyA2DhoBBVA.jpeg.
         case WORLD_BRDF_TEST: {
             AddSky(V3(65/255.f,108/255.f,162/255.f));
@@ -1765,7 +1838,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
 
             /*
             auto material1 = make_shared<dielectric>(1.5);
-            world.add(make_shared<sphere>(point3(0, 1, 0), 1.0, material1));
+            world.add(make_shared<sphere>(V3(0, 1, 0), 1.0, material1));
             */
 
             unsigned int material2=nc_sbcount(g_materials);
@@ -1796,6 +1869,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
     g_world.lights = g_lights;
     g_world.materials = g_materials;
     g_world.planes = g_planes;
+    g_world.quads = g_quads;
     g_world.spheres = g_spheres;
     g_world.meshes = g_meshes;
     g_world.rtas = GenerateAccelerationStructure(&g_world);
