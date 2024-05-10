@@ -160,6 +160,9 @@ X use statified sampling.
 / importance sampling.
     X cosine sample the unit hemisphere.
 - add early ray termination via russian roulette.
+CLEANER CODE:
+- Add instance transforms, which implies we will refactor for a hittable class kind of idea,and reduce our multiple
+  loops to just one!
 PERFORMANCE:
 - Use compute shaders.
 - "Some threads finish all their texels, while others are still working" - we are wasting potential good work!
@@ -1626,8 +1629,9 @@ bool EffectivelySmooth(float roughness){
 
 void LoadWorld(world_kind_t kind, camera_t *c)
 {
-    plane_t MakeGroundPlane();
+    plane_t MakeGroundPlane(unsigned int mat);
     void AddSky(v3 color);
+    void AddSunDirectionalLight();
 
     light_t light;
     plane_t plane;
@@ -1642,39 +1646,40 @@ void LoadWorld(world_kind_t kind, camera_t *c)
     c->focalDistance=5.f;
     c->aperatureRadius=0.035f;
     c->target={};//origin of space,duh.
-
-    // sun directional light.
-    light={.kind = LIGHT_KIND_DIRECTIONAL, .direction = Normalize(V3(1.f,1.f,-1.f)), .radiance = 1.5f *V3(1.f,1.f,1.f)};
-    nc_sbpush(g_lights,light);
     
     switch(kind) {
         case WORLD_DEFAULT: {
             AddSky(V3(65/255.f,108/255.f,162/255.f));
-            nc_sbpush(g_planes,MakeGroundPlane());
+            AddSunDirectionalLight();
 
+            unsigned int planeMat = nc_sbcount(g_materials);
             material={.albedoIdx=1,.metalnessIdx=2,.metalColor=V3(0.562f,0.565f,0.578f),.roughnessIdx=3,.normalIdx=4};
             nc_sbpush(g_materials,material);
+            nc_sbpush(g_planes,MakeGroundPlane(planeMat));
+            
             LoadBespokeTextures();
 
+            unsigned int mat = nc_sbcount(g_materials);
             material={.albedo = V3(0.7f, 0.25f, 0.3f),.roughness = 0.f};
             nc_sbpush(g_materials,material);
+            sphere={.p = V3(0,0,0),.r = 1.0f,.matIndex = mat};
+            nc_sbpush(g_spheres,sphere);
 
+            mat = nc_sbcount(g_materials);
             material={.albedo = V3(0.0f, 0.8f, 0.0f),.metalness=0.8f,
                 .metalColor=V3(0.562f,0.565f,0.578f),
                 .roughness = 0.0f,};
             nc_sbpush(g_materials,material);
+            sphere={.p = V3(-2,0,2),.r = 1.0f,.matIndex = mat};
+            nc_sbpush(g_spheres,sphere);
 
+            mat = nc_sbcount(g_materials);
             material={.albedo = V3(0.3f, 0.25f, 0.7f),.roughness=0.f};
             nc_sbpush(g_materials,material);
-
-            sphere={.p = V3(0,0,0),.r = 1.0f,.matIndex = 2};
+            sphere={.p = V3(-1,-5,0),.r = 1.0f,.matIndex = mat};
             nc_sbpush(g_spheres,sphere);
 
-            sphere={.p = V3(-1,-5,0),.r = 1.0f,.matIndex = 4};
-            nc_sbpush(g_spheres,sphere);
-
-            sphere={.p = V3(-2,0,2),.r = 1.0f,.matIndex = 3};
-            nc_sbpush(g_spheres,sphere);
+            c->fov=30.f;//degrees,obviously.
         }
             break;
         case WORLD_CORNELL_BOX: {
@@ -1727,10 +1732,12 @@ void LoadWorld(world_kind_t kind, camera_t *c)
         // try to roughly match: https://cdn-images-1.medium.com/v2/resize:fit:800/1*IBg4O5MyKVmwyA2DhoBBVA.jpeg.
         case WORLD_BRDF_TEST: {
             AddSky(V3(65/255.f,108/255.f,162/255.f));
+            AddSunDirectionalLight();
 
+            unsigned int planeMat = nc_sbcount(g_materials);
             material={.albedo = V3(0.5f, 0.5f, 0.5f)};
             nc_sbpush(g_materials, material);//ground material.
-            nc_sbpush(g_planes, MakeGroundPlane());
+            nc_sbpush(g_planes, MakeGroundPlane(planeMat));
 
             for (int i=0;i<11;i++)
             for (int j=0;j<11;j++) {
@@ -1752,10 +1759,12 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             break;
         case WORLD_MARIO: {
             AddSky(V3(65/255.f,108/255.f,162/255.f));
+            AddSunDirectionalLight();
 
+            unsigned int planeMat = nc_sbcount(g_materials);
             material={.albedo = V3(0.5f, 0.5f, 0.5f)};
             nc_sbpush(g_materials, material);//ground material.
-            nc_sbpush(g_planes, MakeGroundPlane());
+            nc_sbpush(g_planes, MakeGroundPlane(planeMat));
 
             LoadGltf();
             g_meshes[0].pointCount = nc_sbcount(g_meshes[0].points);
@@ -1781,7 +1790,7 @@ void LoadWorld(world_kind_t kind, camera_t *c)
         case WORLD_RAYTRACING_ONE_WEEKEND: {
 
             // NOTE: I copied the code from https://raytracing.github.io/books/RayTracingInOneWeekend.html#wherenext?/afinalrender
-            // and adapted it. some variable names therefore do not follow the same convention as the rest of the codebase.
+            // and adapted it. some variable names therefore do not follow the same convention as the rest of this codebase.
 
             AddSky(V3(1.f,1.f,1.f));
 
@@ -1871,10 +1880,26 @@ void AddSky(v3 color){
     nc_sbpush(g_materials,material);
 }
 
-plane_t MakeGroundPlane(){
+void AddSunDirectionalLight(){
+    // sun directional light.
+    //light={.kind = LIGHT_KIND_DIRECTIONAL, .direction = Normalize(V3(1.f,1.f,-1.f)), .radiance = 1.5f *V3(1.f,1.f,1.f)};
+    //nc_sbpush(g_lights,light);
+    material_t material;
+    sphere_t sphere;
+
+    unsigned int light = nc_sbcount(g_materials);
+    material={.albedo=V3(0,0,0)/*black body radiation source*/,
+        .emitColor=V3(15.f,15.f,15.f)};
+    nc_sbpush(g_materials,material);
+
+    sphere={.p = V3(2000, 2000, 2000),.r = 1000.f,.matIndex = light};
+    nc_sbpush(g_spheres, sphere);
+}
+
+plane_t MakeGroundPlane(unsigned int mat){
     // ground plane.
     plane_t plane={.n = V3(0,0,1),.d = 0, // plane on origin
-        .matIndex = 1};
+        .matIndex = mat};
     return plane;
 }
 
