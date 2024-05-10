@@ -146,9 +146,13 @@ typedef struct {
 } ray_payload_t;
 
 typedef struct {
-    int width,height;
+    int width, height;
     v3 *data;
 } texture_t;
+
+typedef struct {
+    texture_t *mips;//levels go 0,1,...
+} mipchain_t;
 
 typedef struct {
     // all are stretchy buffers.

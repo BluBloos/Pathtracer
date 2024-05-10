@@ -45,7 +45,7 @@ void LoadBespokeTextures();
 bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
 v3 brdf_diff(material_t &mat,v3 surfPt);
 v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
-v3 SampleTexture(texture_t tex, v2 uv);
+v3 SampleTexture(texture_t tex, v2 uv);//beware to the unitiated-this function takes "uv",but the value should range from 0->size, not 0->1.
 v3 BespokeSampleTexture(texture_t tex, v2 uv);
 bool EffectivelySmooth(float roughness);
 void LoadWorld(world_kind_t kind,camera_t *c);
@@ -55,6 +55,7 @@ void DefineCamera(camera_t *c);
 v3 RandomCosineDirectionHemisphere();
 v3 RandomDirectionHemisphere();
 void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
+mipchain_t GenerateMipmapChain(texture_t tex);
 
 float Schlick(float F0, float cosTheta);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
@@ -72,7 +73,7 @@ static quad_t *g_quads = {};
 static mesh_t *g_meshes = {};
 static aabb_t *g_aabbs = {};
 
-static texture_t g_textures[4]={};
+static mipchain_t g_textures[4]={};
 
 void AddDynamicMaterial(material_t mat)
 {
@@ -424,19 +425,23 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
             if (mat.metalnessIdx==0 || !g_bMetalness) {
                 metalness=mat.metalness;
             } else {
-                texture_t tex=g_textures[mat.metalnessIdx-1];
+                mipchain_t chain=g_textures[mat.metalnessIdx-1];
+                texture_t tex=chain.mips[5];
                 r3 = BespokeSampleTexture( tex, uv );
                 metalness=r3.x;
             }
         }
 
+#if 0
         // find the normal.
         if (g_bNormals && mat.normalIdx!=0){
-            texture_t tex=g_textures[mat.normalIdx-1];
+            mipchain_t chain=g_textures[mat.normalIdx-1];
+            texture_t tex=chain.mips[5];
             N = BespokeSampleTexture(tex, uv );
             // NOTE: this currently only works for the ground plane, since it's normal happens to be up!
             N = Normalize(2.f*N - V3(1.f,1.f,1.f));
         }
+#endif
 
         if (Dot(N, V)<=0.f) break;
 
@@ -1409,7 +1414,8 @@ v3 brdf_diff(material_t &mat, v3 surfPoint)
     if (mat.albedoIdx==0) {
         return piTerm*mat.albedo;
     } else {
-        texture_t tex=g_textures[mat.albedoIdx-1];
+        mipchain_t chain=g_textures[mat.albedoIdx-1];
+        texture_t tex=chain.mips[5];
         // Via the material mapping (might be UVs or some other function), sample the texture.
         v2 uv = {surfPoint.x,surfPoint.y};//for now.
         return piTerm*BespokeSampleTexture(tex, uv );
@@ -1428,7 +1434,8 @@ v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H)
     if (mat.roughnessIdx==0 || !g_bRoughness) {
         roughness=mat.roughness;
     } else {
-        texture_t tex=g_textures[mat.roughnessIdx-1];
+        mipchain_t chain=g_textures[mat.roughnessIdx-1];
+        texture_t tex=chain.mips[5];
         v3 r3 = BespokeSampleTexture(tex, uv );
         roughness=r3.x;
     }
@@ -1537,7 +1544,7 @@ v3 SampleTexture(texture_t tex, v2 uv) {
 
 void LoadBespokeTextures(){
 
-    void LoadTexture(texture_t *texOut,const char *filePath);
+    void LoadTexture(mipchain_t *texOut,const char *filePath);
     //    // ... process data if not NULL ...
     //    // ... x = width, y = height, n = # 8-bit components per pixel ...
     //    // ... replace '0' with '1'..'4' to force that many components per pixel
@@ -1550,21 +1557,23 @@ void LoadBespokeTextures(){
     LoadTexture(&g_textures[3], "res\\rusty-metal_normal-ogl.png");
 }
 
-void LoadTexture(texture_t *texOut,const char *filePath) {
+void LoadTexture(mipchain_t *texOut,const char *filePath) {
     int x,y,n;
     unsigned int *data = (unsigned int *)stbi_load(filePath, &x, &y, &n, 4);
     if (data!=NULL){
-        texOut->width=x;
-        texOut->height=y;
-        texOut->data=(v3*)malloc(sizeof(v3)*x*y);
+        texture_t tex;
+        tex.width=x;
+        tex.height=y;
+        tex.data=(v3*)malloc(sizeof(v3)*x*y);
         for (int Y=0;Y<y;Y++)
         for (int X=0;X<x;X++) {
             unsigned int pixel=data[Y*x+X];
-            texOut->data[Y*x+X].x=float(pixel&0xFF)/255.f;
-            texOut->data[Y*x+X].y=float((pixel>>8)&0xFF)/255.f;
-            texOut->data[Y*x+X].z=float((pixel>>16)&0xFF)/255.f;
+            tex.data[Y*x+X].x=float(pixel&0xFF)/255.f;
+            tex.data[Y*x+X].y=float((pixel>>8)&0xFF)/255.f;
+            tex.data[Y*x+X].z=float((pixel>>16)&0xFF)/255.f;
         }
         stbi_image_free(data);
+        *texOut=GenerateMipmapChain(tex);
     }
 }
 
@@ -2052,4 +2061,27 @@ void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c){
     *a = u;//x
     *b = v;//y
     *c = unit_w;//z
+}
+
+mipchain_t GenerateMipmapChain(texture_t tex){
+    assert(tex.width == tex.height);//currently we only support square textures for this kind of thing.
+    texture_t *chain=nullptr;
+    int level=0;
+    int size=tex.width>>1;
+    nc_sbpush(chain, tex);
+    while(size){
+        texture_t tex,parent=chain[level];
+        tex.width=tex.height=size;
+        tex.data=(v3*)malloc(sizeof(v3)*size*size);
+        for (int y=0;y<size;y++)
+        for (int x=0;x<size;x++) {
+            v2 uv={x*2.f,y*2.f};
+            v3 val=SampleTexture(parent,uv);
+            tex.data[y*size+x]=val;
+        }
+        nc_sbpush(chain, tex);
+        size=size>>1,level++;
+    }
+    mipchain_t result={.mips=chain};
+    return result;
 }
