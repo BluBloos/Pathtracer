@@ -38,7 +38,7 @@ void LoadGltf();
 void LoadBespokeTextures();
 bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
 v3 brdf_diff(material_t &mat,v3 surfPt);
-v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
+v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness);
 v3 SampleTexture(texture_t tex, v2 uv);//beware to the unitiated - this function takes "uv",but the value should range from 0->size, not 0->1.
 v3 BespokeSampleTexture(texture_t tex, v2 uv);
 bool EffectivelySmooth(float roughness);
@@ -385,7 +385,7 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
     do {
     if (hitMatIndex) {
 
-        float cosTheta,NdotL,NdotV,F0,metalness;
+        float cosTheta,NdotL,NdotV,F0,metalness,roughness;
         v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY;
 
         cosTheta=(Dot(nextNormal, rayDirection));
@@ -417,6 +417,15 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
             }
         }
 
+        if (mat.roughnessIdx==0 || !g_bRoughness) {
+            roughness=mat.roughness;
+        } else {
+            mipchain_t chain=g_textures[mat.roughnessIdx-1];
+            texture_t tex=chain.mips[0];
+            v3 r3 = BespokeSampleTexture(tex, uv );
+            roughness=r3.x;
+        }
+
 #if 1
         // find the normal.
         if (g_bNormals && mat.normalIdx!=0){
@@ -439,7 +448,7 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
         {
             float px=1.f/2.f;
 
-            if (bSpecular && EffectivelySmooth(mat.roughness)) {
+            if (bSpecular && EffectivelySmooth(roughness)) {
                 L=pureBounce;
             } else if (!bSpecular){
                 v3 rDir=RandomCosineDirectionHemisphere();
@@ -449,7 +458,7 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
                 halfVector =(1.f/Magnitude(L+V)) * (L+V);
             } else {
                 // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
-                v3 rDir= RandomHalfVectorGGX(mat.roughness);
+                v3 rDir= RandomHalfVectorGGX(roughness);
                 halfVector=Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
                 L = 2.f * (Dot(V, halfVector)) * halfVector - V;
             }
@@ -460,7 +469,7 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
             {
                 // NOTE: the difference here is maybe a little bit subtle. when the surface is perfectly smooth, we
                 // don't require microfacet theory. thus, we won't be using the half vector.
-                if (EffectivelySmooth(mat.roughness)){
+                if (EffectivelySmooth(roughness)){
                     ks_local = SchlickMetal(F0,NdotL,metalness,mat.metalColor);
                     //ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
                 } else if (((Dot(halfVector,V)>0.f)&&cosTheta>0.f)){
@@ -473,14 +482,14 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
                 for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
                 kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
                 
-                if (bSpecular&&EffectivelySmooth(mat.roughness)) {
+                if (bSpecular&&EffectivelySmooth(roughness)) {
                     // if the surface is perfectly smooth, there is no need for microfacet theory and the
                     // brdf is given by the dirac delta in the perfect fresnel ref dir;
                     brdfTerm = ks_local;
                     px=1.f/2.f;//and therefore,
                     // we don't need an estimator either. We just take the term.
                 } else if (bSpecular) {
-                    brdfTerm = Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector ) );
+                    brdfTerm = Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector, roughness ) );
                 } else {
                     brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin));
                 }
@@ -1187,22 +1196,12 @@ v3 brdf_diff(material_t &mat, v3 surfPoint)
     return piTerm*V3(1.f,1.f,1.f);
 }
 
-v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H)
+v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness)
 {
-    float roughness;
     // Via the material mapping (might be UVs or some other function), sample the texture.
     v2 uv = {surfPoint.x,surfPoint.y};//for now.
 
     //float scaling=1.f/255.f;
-
-    if (mat.roughnessIdx==0 || !g_bRoughness) {
-        roughness=mat.roughness;
-    } else {
-        mipchain_t chain=g_textures[mat.roughnessIdx-1];
-        texture_t tex=chain.mips[0];
-        v3 r3 = BespokeSampleTexture(tex, uv );
-        roughness=r3.x;
-    }
 
     v3 spec = HammonMaskingShadowing(normal, L, V, roughness)*
         (fabsf(Dot(H,L))/fabsf(Dot(normal,L))/fabsf(Dot(H,normal)))*V3(1.f,1.f,1.f);

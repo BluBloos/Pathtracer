@@ -2,7 +2,10 @@
     "files.associations": {
         "random": "cpp",
         "xlocale": "cpp",
-        "memory": "cpp"
+        "memory": "cpp",
+        "vector": "cpp",
+        "xstring": "cpp",
+        "xutility": "cpp"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }
