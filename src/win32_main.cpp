@@ -39,7 +39,7 @@ void LoadBespokeTextures();
 bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
 v3 brdf_diff(material_t &mat,v3 surfPt);
 v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H);
-v3 SampleTexture(texture_t tex, v2 uv);//beware to the unitiated-this function takes "uv",but the value should range from 0->size, not 0->1.
+v3 SampleTexture(texture_t tex, v2 uv);//beware to the unitiated - this function takes "uv",but the value should range from 0->size, not 0->1.
 v3 BespokeSampleTexture(texture_t tex, v2 uv);
 bool EffectivelySmooth(float roughness);
 void LoadWorld(world_kind_t kind,camera_t *c);
@@ -54,6 +54,8 @@ mipchain_t GenerateMipmapChain(texture_t tex);
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
 float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
 float GGX(v3 N, v3 H, float roughness);
+v3 RandomHalfVectorGGX(float roughness);
+float BurleyParameterization(float roughness);
 
 static world_t g_world = {};
 static camera_t g_camera = {};
@@ -162,6 +164,8 @@ FUTURE WORK:
 - add support for materials with nanogeometry , where geometric optics model breaks down (e.g. thin films).
 - there's a whole can of worms when it comes to specular antialiasing. Open it!
     - despite shaky theory, can use Toksvig equation.
+- I could read Lee et al. 2017 to determine that I don't need to bilinear filter the texture maps.
+- look into ray differentials for generically determine the gradients required to select the mip level. 
 */
 
 static unsigned int GetTotalPixelSize(image_32_t image) {
@@ -407,17 +411,17 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
                 metalness=mat.metalness;
             } else {
                 mipchain_t chain=g_textures[mat.metalnessIdx-1];
-                texture_t tex=chain.mips[5];
+                texture_t tex=chain.mips[0];
                 r3 = BespokeSampleTexture( tex, uv );
                 metalness=r3.x;
             }
         }
 
-#if 0
+#if 1
         // find the normal.
         if (g_bNormals && mat.normalIdx!=0){
             mipchain_t chain=g_textures[mat.normalIdx-1];
-            texture_t tex=chain.mips[5];
+            texture_t tex=chain.mips[0];
             N = BespokeSampleTexture(tex, uv );
             // NOTE: this currently only works for the ground plane, since it's normal happens to be up!
             N = Normalize(2.f*N - V3(1.f,1.f,1.f));
@@ -437,15 +441,19 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
 
             if (bSpecular && EffectivelySmooth(mat.roughness)) {
                 L=pureBounce;
-
-            } else {
+            } else if (!bSpecular){
                 v3 rDir=RandomCosineDirectionHemisphere();
                 v3 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
                 L = lobeBounce;
                 px *= 1.f/PI;
+                halfVector =(1.f/Magnitude(L+V)) * (L+V);
+            } else {
+                // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
+                v3 rDir= RandomHalfVectorGGX(mat.roughness);
+                halfVector=Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
+                L = 2.f * (Dot(V, halfVector)) * halfVector - V;
             }
 
-            halfVector =(1.f/Magnitude(L+V)) * (L+V);
             cosTheta=Dot(halfVector,L);
 
             if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
@@ -1171,7 +1179,7 @@ v3 brdf_diff(material_t &mat, v3 surfPoint)
         return piTerm*mat.albedo;
     } else {
         mipchain_t chain=g_textures[mat.albedoIdx-1];
-        texture_t tex=chain.mips[5];
+        texture_t tex=chain.mips[0];
         // Via the material mapping (might be UVs or some other function), sample the texture.
         v2 uv = {surfPoint.x,surfPoint.y};//for now.
         return piTerm*BespokeSampleTexture(tex, uv );
@@ -1191,15 +1199,13 @@ v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H)
         roughness=mat.roughness;
     } else {
         mipchain_t chain=g_textures[mat.roughnessIdx-1];
-        texture_t tex=chain.mips[5];
+        texture_t tex=chain.mips[0];
         v3 r3 = BespokeSampleTexture(tex, uv );
         roughness=r3.x;
     }
 
-    v3 spec= GGX(normal, H, roughness)*
-        HammonMaskingShadowing(normal, L, V, roughness)*
-        (0.25f/fabsf(Dot(normal,L))/fabsf(Dot(normal,V)))*
-        V3(1.f,1.f,1.f);
+    v3 spec = HammonMaskingShadowing(normal, L, V, roughness)*
+        (fabsf(Dot(H,L))/fabsf(Dot(normal,L))/fabsf(Dot(H,normal)))*V3(1.f,1.f,1.f);
     return spec;
 }
 
@@ -1341,7 +1347,7 @@ v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor) {
 
 float GGX(v3 N, v3 H, float roughness)
 {
-    float a2     = roughness*roughness*roughness*roughness;
+    float a2     = BurleyParameterization(roughness);
 
     float NdotH  = Dot(N, H);
     float denom  = (1.0f + NdotH*NdotH * (a2 - 1.0f));
@@ -1355,7 +1361,7 @@ float GGX(v3 N, v3 H, float roughness)
 
 // presented at GDC!
 float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness){
-    float a2     = roughness*roughness*roughness*roughness;
+    float a2     = BurleyParameterization(roughness);
     // we know that both NdotV and NdotL are positive and nonzero!
     float NdotV=Dot(N,V);
     float NdotL=Dot(N,L);
@@ -1751,6 +1757,11 @@ void DefineCamera(camera_t *c) {
     }
 }
 
+// https://media.disneyanimation.com/uploads/production/publication_asset/48/asset/s2012_pbs_disney_brdf_notes_v3.pdf
+float BurleyParameterization(float roughness){
+    return roughness*roughness*roughness*roughness;
+}
+
 // from https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html
 // p(dir)=cos(theta)/PI.
 v3 RandomCosineDirectionHemisphere(){
@@ -1764,6 +1775,24 @@ v3 RandomCosineDirectionHemisphere(){
 
     return V3(x, y, z);
 }
+
+// https://schuttejoe.github.io/post/ggximportancesamplingpart1/
+v3 RandomHalfVectorGGX(float roughness){
+    float a2 = BurleyParameterization(roughness);
+    float z1 = RandomUnilateral();
+    float z2 = RandomUnilateral();
+
+    float theta,phi;
+    phi=2.f*PI*z1;
+    theta=acos( sqrt( (1.f-z2)/(1.f+z2*(a2-1.f)) ) );
+
+    float x = cos(phi)*sin(theta);
+    float y = sin(phi)*sin(theta);
+    float z = cos(theta);
+
+    return V3(x, y, z);
+}
+
 
 void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c){
     // NOTE that: X x Y  = Z;
