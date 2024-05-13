@@ -502,6 +502,8 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
                     0.5f * PdfValue<CosinePdf>(Normalize(rDir)) + 
                     0.5f *
                     PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin));
+                if (px==0.f)
+                    break;
             } else {
                 // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
                 v3 rDir= RandomHalfVectorGGX(roughness);
@@ -618,6 +620,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                 float filmX = -1.0f + 2.0f * (float)x / (float)g_image.width;
 
                 v3 color = {};
+                v3 radiance={};
 
 #if DEBUG_MIDDLE_PIXEL
                 if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) continue;
@@ -647,7 +650,9 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                                 ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
                                 ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
                             rayDirection = Normalize(filmP - g_camera.pos);
-                            color = color + contrib * RayCastFast(&g_world, rayOrigin, rayDirection,0);
+
+                            radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
+                            color = color + contrib * ( IsNaN(radiance)?V3(0,0,0):radiance );
                         }
                     }
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
@@ -701,7 +706,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             rayOriginDisk = rayOrigin + diskSample.x*g_camera.aperatureRadius*g_camera.axisX + diskSample.y*g_camera.aperatureRadius*g_camera.axisY;
                             rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
 
-                            color = color + contrib * RayCastFast(&g_world, rayOriginDisk, rayDirectionDisk,0);
+                            radiance=RayCast(&g_world, rayOriginDisk, rayDirectionDisk,0);
+                            color = color + contrib * ( IsNaN(radiance)?V3(0,0,0):radiance );
                         }
                     }
                 }

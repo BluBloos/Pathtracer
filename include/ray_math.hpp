@@ -486,3 +486,8 @@ static aabb_t AABBFromCube(v3 bottomLeft, float width)
     const v3 origin = bottomLeft + halfDim;
     return MakeAABB(origin, halfDim);
 }
+
+inline bool IsNaN(v3 A){
+    // Exploit the interesting property of NaNs where it is not equal to itself.
+    return A.x!=A.x||A.y!=A.y||A.z!=A.z;
+}
