@@ -50,7 +50,6 @@ approach because I was looking for a coding adventure :)
 e.g.: "AutomataApp.exe -t16 -p16 -nmr"
 ```
 t<int>                        - Set the number of threads to use.
-s<int>                        - Set the number of brdf sample points.
 p<int>                        - Set the rays to shoot per pixel.
 w<int>                        - Set the world number to load. Possible options:
   1:  Default scene.

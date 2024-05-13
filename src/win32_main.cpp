@@ -1719,7 +1719,6 @@ plane_t MakeGroundPlane(unsigned int mat){
 
 void PrintHelp() {
     printf("t<int>                        - Set the number of threads to use.\n");
-    printf("s<int>                        - Set the number of brdf sample points.\n");
     printf("p<int>                        - Set the rays to shoot per pixel.\n");
     printf("w<int>                        - Set the world number to load. Possible options:\n"
            "\t1:\tDefault scene.\n"
