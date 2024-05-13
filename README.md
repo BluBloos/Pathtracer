@@ -10,7 +10,8 @@ which I reference in the References section below. I'm aware that this isn't the
 ideal approach for writing a Path Tracer as fast as possible; I chose this
 approach because I was looking for a coding adventure :)
 
-![test](https://user-images.githubusercontent.com/38915815/190832651-a5e9dd42-5df7-4130-9d25-d87d7a039c7e.jpeg)
+![test](https://github.com/BluBloos/Pathtracer/assets/38915815/5c0ad3e0-27ed-46ff-a8ab-6bab018551e5)
+
 
 # Features
 
