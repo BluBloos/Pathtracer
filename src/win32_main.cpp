@@ -479,12 +479,14 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 L=pureBounce;
                 px=1.f;
             } else if (!bSpecular){
+                bool bHack=g_worldKind==WORLD_RAYTRACING_ONE_WEEKEND;
+
                 float r1 = RandomUnilateral();
                 //hittable_t importantLight; // Three cases. 1: sample sphere. 2. sample square light. 3. sample nothing,because there is no light.
                 //assert(incomingLight)
                 sphere_t importantLight=world->spheres[0];//for now, this only works for some scenes.
                 v3 rDir,lobeBounce;
-                if (r1>0.5f)
+                if (r1>0.5f || bHack)
                 {
                     rDir=RandomCosineDirectionHemisphere();   
                 } else {
@@ -497,13 +499,18 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 L = lobeBounce;    
                 halfVector =(1.f/Magnitude(L+V)) * (L+V);
 
-                // Now that we are using a gaussian mixture, it's important to retain the cosTheta term from rendering equation.
-                px = (
-                    0.5f * PdfValue<CosinePdf>(Normalize(rDir)) + 
-                    0.5f *
-                    PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin));
-                if (px==0.f)
-                    break;
+                if (!bHack) {
+                    // Now that we are using a gaussian mixture, it's important to retain the cosTheta term from rendering equation.
+                    px = (
+                        0.5f * PdfValue<CosinePdf>(Normalize(rDir)) + 
+                        0.5f *
+                        PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin));
+                    if (px==0.f)
+                        break;
+                } else {
+                    px = PdfValue<CosinePdf>(Normalize(rDir));
+                }
+
             } else {
                 // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
                 v3 rDir= RandomHalfVectorGGX(roughness);

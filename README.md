@@ -4,11 +4,11 @@ My personal implementation of a roughly "feature complete" Path Tracer. The
 beginnings of the codebase were roughly identical to the Path Tracer constructed
 during the Handmade Ray Day 1 livestream, archived at
 https://guide.handmadehero.org/ray/ray00/. From then, I programmed the rest "in
-the dark"; i.e., I didn't consult any open source Path Tracer implementations.
-To guide development, I sourced content from textbooks which I reference in the
-References section below. I'm aware that this isn't the ideal approach for
-writing a Path Tracer as fast as possible; I chose this approach because I was
-looking for a coding adventure :)
+the dark" (for the most part); i.e., I didn't consult any open source Path
+Tracer implementations. To guide development, I sourced content from books,
+which I reference in the References section below. I'm aware that this isn't the
+ideal approach for writing a Path Tracer as fast as possible; I chose this
+approach because I was looking for a coding adventure :)
 
 ![test](https://user-images.githubusercontent.com/38915815/190832651-a5e9dd42-5df7-4130-9d25-d87d7a039c7e.jpeg)
 
@@ -26,7 +26,6 @@ looking for a coding adventure :)
   - Disney "principled" roughness parameterization.
 - Physical lens model.
 - GLTF import.
-- Surface (area) and Directional lights.
 - Supported Geometry: Triangles, Spheres, Planes, AABBs, Quads.
 - Multithreaded architecture.
 - Live viewer.
@@ -34,13 +33,14 @@ looking for a coding adventure :)
 
 # References
 
-- https://www.pbr-book.org/4ed/Monte_Carlo_Integration, among other chapters maybe.
+- I read https://www.pbr-book.org/4ed/Monte_Carlo_Integration and maybe other chapters.
 - I own a physical copy of https://www.realtimerendering.com/; I sampled various
-  chapters, primarly chapter 9.
+  chapters, especially chapter 9.
 - I read the entire series to ensure completeness of my implementation:
   - [_Ray Tracing in One Weekend_](https://raytracing.github.io/books/RayTracingInOneWeekend.html)
   - [_Ray Tracing: The Next Week_](https://raytracing.github.io/books/RayTracingTheNextWeek.html)
   - [_Ray Tracing: The Rest of Your Life_](https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html)
+- Importance sampling GGX: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
 
 # Steps for Building
 
