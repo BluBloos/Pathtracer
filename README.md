@@ -43,6 +43,26 @@ approach because I was looking for a coding adventure :)
   - [_Ray Tracing: The Rest of Your Life_](https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html)
 - Importance sampling GGX: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
 
+# Usage
+
+e.g.: "AutomataApp.exe -t16 -p16 -nmr"
+
+t<int>                        - Set the number of threads to use.
+s<int>                        - Set the number of brdf sample points.
+p<int>                        - Set the rays to shoot per pixel.
+w<int>                        - Set the world number to load. Possible options:
+  1:  Default scene.
+  2:  Metal-roughness test.
+  3:  Cornell box.
+  4:  Ray Tracing in One Weekend book cover.
+  5:  Mario N64 model.
+    
+d                             - Enable depth of field via thin-lens approximation.
+n                             - Disable loading normal map textures.
+m                             - Disable loading metalness material textures.
+r                             - Disable loading roughness material textures.
+h                             - Print this help menu.
+
 # Steps for Building
 
 This project depends on my game engine, Automata-Engine. You can find that here: https://github.com/BluBloos/Automata-Engine
