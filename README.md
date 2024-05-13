@@ -11,6 +11,7 @@ ideal approach for writing a Path Tracer as fast as possible; I chose this
 approach because I was looking for a coding adventure :)
 
 ![test](https://github.com/BluBloos/Pathtracer/assets/38915815/5c0ad3e0-27ed-46ff-a8ab-6bab018551e5)
+![test_balls](https://github.com/BluBloos/Pathtracer/assets/38915815/dffa43b0-96ec-4a4e-8481-90217ea9e0c1)
 
 
 # Features
