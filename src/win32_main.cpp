@@ -28,7 +28,7 @@
 #define MIN_ROUGHNESS float(0.01f)
 
 static v3 TonemapPass(v3 pixel);
-static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth);
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
 static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
 void visualizer(game_memory_t *gameMemory);
 DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
@@ -385,7 +385,7 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     return p;
 }
 
-static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
 {
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
     v3 rayOrigin, rayDirection;
@@ -550,7 +550,7 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
                 }
 
                 // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
-                radiance += 2.f * (1.f/px) * Hadamard(RayCastFast(world,rayOrigin,L,depth+1), brdfTerm);
+                radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
             }
         } // END spawning the bounce rays.
 
