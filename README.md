@@ -46,7 +46,7 @@ approach because I was looking for a coding adventure :)
 # Usage
 
 e.g.: "AutomataApp.exe -t16 -p16 -nmr"
-
+```
 t<int>                        - Set the number of threads to use.
 s<int>                        - Set the number of brdf sample points.
 p<int>                        - Set the rays to shoot per pixel.
@@ -62,7 +62,7 @@ n                             - Disable loading normal map textures.
 m                             - Disable loading metalness material textures.
 r                             - Disable loading roughness material textures.
 h                             - Print this help menu.
-
+```
 # Steps for Building
 
 This project depends on my game engine, Automata-Engine. You can find that here: https://github.com/BluBloos/Automata-Engine
