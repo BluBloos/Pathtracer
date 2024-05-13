@@ -34,11 +34,6 @@ typedef struct {
 } image_32_t;
 
 typedef struct material {
-
-    // metals (conductors) have special properties w.r.t. light.
-    // when the EM wave arrives at a conductor interface, the wave goes to zero quite quickly at a characteristic
-    // length-scale called the skin-depth.
-    // (effectively, is completely absorbed and there is no scattering).
     
     // Depending on the interface, we can determine how much was refracted and how much was reflected.
     // i.e. 

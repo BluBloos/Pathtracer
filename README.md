@@ -15,6 +15,9 @@ looking for a coding adventure :)
 # Features
 
 - Importance sampling Monte Carlo Integration.
+  - GGX importance sampling.
+  - Emissive sphere importance sampling.
+  - Cosine sampling.
 - Materials:
   - Specular BSDF from microfacet theory: GGX distribution function, Smith joint
   shadow-masking courtesy of Hammon et al., and Slick approximation of Fresnel equations.

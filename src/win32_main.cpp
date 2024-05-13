@@ -46,16 +46,20 @@ void LoadWorld(world_kind_t kind,camera_t *c);
 void ParseArgs();
 void PrintHelp();
 void DefineCamera(camera_t *c);
-v3 RandomCosineDirectionHemisphere();
-v3 RandomDirectionHemisphere();
 void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
 mipchain_t GenerateMipmapChain(texture_t tex);
 
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
 float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
 float GGX(v3 N, v3 H, float roughness);
-v3 RandomHalfVectorGGX(float roughness);
 float BurleyParameterization(float roughness);
+
+v3 RandomToSphere(sphere_t sphere, v3 from);
+v3 RandomHalfVectorGGX(float roughness);
+v3 RandomCosineDirectionHemisphere();
+v3 RandomDirectionHemisphere();
+
+float RaySphereIntersect(v3 origin, v3 direction, float minHitDistance, sphere_t sphere, v3 *normal);
 
 static world_t g_world = {};
 static camera_t g_camera = {};
@@ -168,6 +172,36 @@ FUTURE WORK:
 - look into ray differentials for generically determine the gradients required to select the mip level. 
 */
 
+// okay, this is really bad from, but depending on the template argument (which Pdf to eval),
+// the func signature is going to change. in CosinePdf we pass dir in tangent space.
+// whereas in PdfValue we pass dir in global.
+
+constexpr int CosinePdf=0;
+constexpr int ToSpherePdf=1;
+
+template<int Pdf>
+float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f)){
+    switch(Pdf){
+        case CosinePdf: return max(0.f,Dot(V3(0,0,1), dir)/PI); break;
+        default: assert(false);//not supported.
+    }
+}
+
+template<>
+float PdfValue<ToSpherePdf>(v3 dir, sphere_t sphere, v3 from){
+
+    // 0 if direction doesn't intersect with sphere.
+    float minHitDistance = MIN_HIT_DISTANCE;
+    v3 N;
+    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)==minHitDistance)
+        return 0.f;
+
+    // https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly.
+    float cos_theta_max = sqrt(1.f - sphere.r*sphere.r/MagnitudeSquared( from - sphere.p ));
+    float solid_angle = 2.f*PI*(1.f-cos_theta_max);
+    return  1.f / solid_angle;
+}
+
 static unsigned int GetTotalPixelSize(image_32_t image) {
     return image.height * image.width * sizeof(unsigned int);
 }
@@ -234,27 +268,14 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         sphereIndex < nc_sbcount(world->spheres);
         sphereIndex++
     ) {
-        sphere_t sphere = world->spheres[sphereIndex];  
-        v3 sphereRelativeRayOrigin = rayOrigin - sphere.p;
-        float a = Dot(rayDirection, rayDirection);
-        float b = 2.0f * Dot(sphereRelativeRayOrigin, rayDirection);
-        float c = Dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
-            - sphere.r * sphere.r;
-        float denom = 2.0f * a;
-        float discriminant = b * b - 4.0f * a * c;
-        if (discriminant<0.f)continue;
-        float rootTerm = SquareRoot(discriminant);
-        if (rootTerm > tolerance){
-            // NOTE(Noah): The denominator can never be zero, since we always have a valid direction.
-            //also note that despite two roots, we don't need to check which is closer. the minus rootTerm
-            //will always be closer, since rootTerm is positive.
-            float tn = (-b - rootTerm) / denom;
-            float t = tn;
-            if ((t > minHitDistance) && (t < hitDistance)) {
-                hitDistance = t;
-                hitMatIndex = sphere.matIndex;
-                nextNormal = Normalize(t*rayDirection + sphereRelativeRayOrigin);
-            }
+        sphere_t sphere = world->spheres[sphereIndex];
+        float t;
+        v3 N;
+        if ((t=RaySphereIntersect(rayOrigin, rayDirection, minHitDistance, sphere, &N))>minHitDistance &&
+            t < hitDistance) {
+            hitDistance = t;
+            hitMatIndex = sphere.matIndex;
+            nextNormal=N;
         }
     }
 
@@ -386,7 +407,7 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
     if (hitMatIndex) {
 
         float cosTheta,NdotL,NdotV,F0,metalness,roughness;
-        v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY;
+        v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
 
         cosTheta=(Dot(nextNormal, rayDirection));
         cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
@@ -440,27 +461,53 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
         if (Dot(N, V)<=0.f) break;
 
         // Define the local tangent space using the normal.
-        BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &N );
+        BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &tangentZ );
 
         // use monte carlo estimator.
-        // for (int i=0;i<tapCount;i++).
         bool bSpecular=RandomUnilateral()>0.5f;
         {
-            float px=1.f/2.f;
+            float px;
+            // the code below is somewhat nuanced. we use a correction weight. what is the "correction weight"?
+            // well, the total brdf term is specular+diffuse. so, we can split that integral into two,
+            // because integrals are linear. thus, what was a single statistical estimator before is
+            // split into two estimators. so, the probabilistic bSpecular choice here has nothing to do
+            // with PDF mixtures. it selects which estimator we will add a sample from. finally, the correction
+            // weight multiplies by two since the 1/N term that occurs at the end isn't aware of the funny
+            // business that we're doing here.
 
             if (bSpecular && EffectivelySmooth(roughness)) {
                 L=pureBounce;
+                px=1.f;
             } else if (!bSpecular){
-                v3 rDir=RandomCosineDirectionHemisphere();
-                v3 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
-                L = lobeBounce;
-                px *= 1.f/PI;
+                float r1 = RandomUnilateral();
+                //hittable_t importantLight; // Three cases. 1: sample sphere. 2. sample square light. 3. sample nothing,because there is no light.
+                //assert(incomingLight)
+                sphere_t importantLight=world->spheres[0];//for now, this only works for some scenes.
+                v3 rDir,lobeBounce;
+                if (r1>0.5f)
+                {
+                    rDir=RandomCosineDirectionHemisphere();   
+                } else {
+                    v3 direction = importantLight.p - rayOrigin;
+                    rDir=RandomToSphere(importantLight, rayOrigin);
+                    BuildOrthonormalBasisFromW( direction, &tangentX, &tangentY, &tangentZ );
+                }
+                
+                lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*tangentZ);
+                L = lobeBounce;    
                 halfVector =(1.f/Magnitude(L+V)) * (L+V);
+
+                // Now that we are using a gaussian mixture, it's important to retain the cosTheta term from rendering equation.
+                px = (
+                    0.5f * PdfValue<CosinePdf>(Normalize(rDir)) + 
+                    0.5f *
+                    PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin));
             } else {
                 // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
                 v3 rDir= RandomHalfVectorGGX(roughness);
                 halfVector=Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
                 L = 2.f * (Dot(V, halfVector)) * halfVector - V;
+                px=1.f;
             }
 
             cosTheta=Dot(halfVector,L);
@@ -480,22 +527,28 @@ static v3 RayCastFast(world_t *world, v3 o, v3 d, int depth)
                 
                 kd_local=V3(1.f,1.f,1.f)-ks_local;
                 for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
-                kd_local = Lerp(kd_local, V3(0,0,0), metalness); // metal surfaces have a very high absorption!
+
+                // metals (conductors) have special properties w.r.t. light.
+                // when the EM wave arrives at a conductor interface, the wave goes to zero quite quickly at a characteristic
+                // length-scale called the skin-depth.
+                // (effectively, is completely absorbed and there is no scattering => less diffuse color).
+                kd_local = Lerp(kd_local, V3(0,0,0), metalness);
                 
                 if (bSpecular&&EffectivelySmooth(roughness)) {
                     // if the surface is perfectly smooth, there is no need for microfacet theory and the
                     // brdf is given by the dirac delta in the perfect fresnel ref dir;
                     brdfTerm = ks_local;
-                    px=1.f/2.f;//and therefore,
+                    //and therefore,
                     // we don't need an estimator either. We just take the term.
                 } else if (bSpecular) {
+                    // NOTE: for specular, the 1/p(x) term is baked into brdf_specular.
                     brdfTerm = Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector, roughness ) );
                 } else {
-                    brdfTerm = Hadamard(kd_local, brdf_diff(mat,rayOrigin));
+                    brdfTerm = NdotL * Hadamard(kd_local, brdf_diff(mat,rayOrigin));
                 }
 
                 // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
-                radiance += (1.f/px) * Hadamard(RayCastFast(world,rayOrigin,L,depth+1), brdfTerm);
+                radiance += 2.f * (1.f/px) * Hadamard(RayCastFast(world,rayOrigin,L,depth+1), brdfTerm);
             }
         } // END spawning the bounce rays.
 
@@ -1402,7 +1455,8 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             unsigned int planeMat = nc_sbcount(g_materials);
             material={.albedoIdx=1,.metalnessIdx=2,.metalColor=V3(0.562f,0.565f,0.578f),.roughnessIdx=3,.normalIdx=4};
             nc_sbpush(g_materials,material);
-            nc_sbpush(g_planes,MakeGroundPlane(planeMat));
+            sphere={.p = V3(0,0,-1000),.r = 1000,.matIndex = planeMat};
+            nc_sbpush(g_spheres,sphere);
             
             LoadBespokeTextures();
 
@@ -1452,8 +1506,8 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             quad={.point=V3(0,0,0),.u=  V3(0,0,555),.v= V3(0,555,0), .matIndex=red};
             nc_sbpush(g_quads,quad);
 
-            quad={.point=V3(343,332,554),.u=V3(-130,0,0),.v=V3(0,-105,0),.matIndex= light};
-            nc_sbpush(g_quads,quad);
+            sphere={.p=V3(278,279,554),.r=65,.matIndex= light};
+            nc_sbpush(g_spheres,sphere);
 
             // cornell floor.
             quad={.point=V3(555,555,555),.u= V3(-555,0,0), .v=V3(0,-555,0),.matIndex= white};
@@ -1833,4 +1887,46 @@ mipchain_t GenerateMipmapChain(texture_t tex){
     }
     mipchain_t result={.mips=chain};
     return result;
+}
+
+// from https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly
+v3 RandomToSphere(sphere_t sphere, v3 from) {
+    float distance_squared = MagnitudeSquared(from-sphere.p);// Square(from.x-sphere.p.x)+Square(from.y-sphere.p.y)+Square(from.z-sphere.p.z);
+    assert(distance_squared>0.f);//responsibility of the caller.
+
+    float r1 = RandomUnilateral();
+    float r2 = RandomUnilateral();
+    float z = 1.f + r2*(sqrt(1.f-sphere.r*sphere.r/distance_squared) - 1.f);
+
+    float phi = 2*PI*r1;
+    float x = cos(phi)*sqrt(1-z*z);
+    float y = sin(phi)*sqrt(1-z*z);
+
+    return V3(x, y, z);
+}
+
+float RaySphereIntersect(v3 rayOrigin, v3 rayDirection, float minHitDistance, sphere_t sphere, v3 *normal){
+    // sphere intersection test.
+    float tolerance = TOLERANCE;
+    v3 sphereRelativeRayOrigin = rayOrigin - sphere.p;
+    float a = Dot(rayDirection, rayDirection);
+    float b = 2.0f * Dot(sphereRelativeRayOrigin, rayDirection);
+    float c = Dot(sphereRelativeRayOrigin, sphereRelativeRayOrigin) 
+        - sphere.r * sphere.r;
+    float denom = 2.0f * a;
+    float discriminant = b * b - 4.0f * a * c;
+    if (discriminant<0.f)return minHitDistance;
+    float rootTerm = SquareRoot(discriminant);
+    if (rootTerm > tolerance){
+        // NOTE(Noah): The denominator can never be zero, since we always have a valid direction.
+        //also note that despite two roots, we don't need to check which is closer. the minus rootTerm
+        //will always be closer, since rootTerm is positive.
+        float tn = (-b - rootTerm) / denom;
+        float t = tn;
+        if ((t > minHitDistance)  ) {
+            *normal = Normalize(t*rayDirection + sphereRelativeRayOrigin);
+            return t;
+        }
+    }
+    return minHitDistance;
 }

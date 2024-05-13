@@ -333,6 +333,12 @@ static float Square(float a) {
     return a*a;
 }
 
+inline float MagnitudeSquared(v3 a) {
+    float result;
+    result = (a.x * a.x + a.y * a.y + a.z * a.z);
+    return result;
+}
+
 constexpr int PLANAR_TRIANGLE=0;
 constexpr int PLANAR_QUAD=1;
 
