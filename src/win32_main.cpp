@@ -666,7 +666,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             rayDirection = Normalize(filmP - g_camera.pos);
 
                             radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
-                            color = color + contrib * ( IsNaN(radiance)?V3(0,0,0):radiance );
+                            if (IsNaN(radiance)) {j--;continue;}//try again.
+                            color = color + contrib * radiance;
                         }
                     }
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
@@ -720,8 +721,9 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             rayOriginDisk = rayOrigin + diskSample.x*g_camera.aperatureRadius*g_camera.axisX + diskSample.y*g_camera.aperatureRadius*g_camera.axisY;
                             rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
 
-                            radiance=RayCast(&g_world, rayOriginDisk, rayDirectionDisk,0);
-                            color = color + contrib * ( IsNaN(radiance)?V3(0,0,0):radiance );
+                            radiance=RayCast(&g_world, rayOriginDisk, rayDirectionDisk, 0);
+                            if (IsNaN(radiance)) {rayIndex2--;continue;}//try again.
+                            color = color + contrib * radiance;
                         }
                     }
                 }
