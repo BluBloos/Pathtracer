@@ -14,7 +14,17 @@
 #define NC_DS_IMPLEMENTATION
 #include "nc_ds.h"
 
+// debug macro interface.
 #define DEBUG_MIDDLE_PIXEL 0
+#define DEBUG_JUST_COSINE  0
+#define DEBUG_JUST_IMPORTANT_LIGHT 0
+
+enum class debug_render_kind_t {
+    regular,
+    primary_ray_normals,
+    bounce_count
+};
+constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::primary_ray_normals;
 
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
@@ -404,13 +414,14 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     p=RayCastIntersect(world, rayOrigin, rayDirection);
       
     material_t mat = world->materials[hitMatIndex];
+    v3 N=nextNormal;
     do {
     // NOTE: We terminate at emissve materials since the photons originate from these and we are actually tracing
     // backwards.
     if (hitMatIndex && IsNotEmissive(mat)) {
 
         float cosTheta,NdotL,NdotV,F0,metalness,roughness;
-        v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
+        v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
 
         cosTheta=(Dot(nextNormal, rayDirection));
         cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
@@ -424,7 +435,6 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         rayOrigin = rayOrigin + hitDistance * rayDirection;
         pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
 
-        N=Dot(nextNormal,rayDirection)<0.f ? nextNormal:-1.f*nextNormal;
         V=-rayDirection;
 
         // Via the material mapping (might be UVs or some other function), sample the texture.
@@ -467,8 +477,11 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &tangentZ );
 
         // use monte carlo estimator.
-        bool bSpecular=RandomUnilateral()>0.5f;
-        {
+        const bool bJustCosine=DEBUG_JUST_COSINE || (g_worldKind==WORLD_RAYTRACING_ONE_WEEKEND);
+        constexpr bool bJustImportance=DEBUG_JUST_IMPORTANT_LIGHT;
+        assert( !(bJustImportance && bJustCosine) && "they can't both be true." );
+        do {
+            bool bSpecular=RandomUnilateral()>0.5f;
             float px;
             // the code below is somewhat nuanced. we use a correction weight. what is the "correction weight"?
             // well, the total brdf term is specular+diffuse. so, we can split that integral into two,
@@ -481,18 +494,17 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
             if (bSpecular && EffectivelySmooth(roughness)) {
                 L=pureBounce;
                 px=1.f;
-            } else if (!bSpecular){
-                bool bHack=g_worldKind==WORLD_RAYTRACING_ONE_WEEKEND;
+            } else if (!bSpecular) {
 
-                float r1 = RandomUnilateral();
+                bool bSampleCosine = RandomUnilateral()>0.5f;
                 //hittable_t importantLight; // Three cases. 1: sample sphere. 2. sample square light. 3. sample nothing,because there is no light.
                 //assert(incomingLight)
                 sphere_t importantLight=world->spheres[0];//for now, this only works for some scenes.
                 v3 rDir,lobeBounce;
-                if (r1>0.5f || bHack)
+                if ( !bJustImportance && (bSampleCosine || bJustCosine) )
                 {
                     rDir=RandomCosineDirectionHemisphere();   
-                } else {
+                } else if ( !bJustCosine && (!bSampleCosine || bJustImportance) ) {
                     v3 direction = importantLight.p - rayOrigin;
                     rDir=RandomToSphere(importantLight, rayOrigin);
                     BuildOrthonormalBasisFromW( direction, &tangentX, &tangentY, &tangentZ );
@@ -502,17 +514,21 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 L = lobeBounce;    
                 halfVector =(1.f/Magnitude(L+V)) * (L+V);
 
-                if (!bHack) {
-                    // Now that we are using a gaussian mixture, it's important to retain the cosTheta term from rendering equation.
+                if ( !bJustCosine && !bJustImportance ) {
+                    // Now that we are using a pdf mixture, it's important to retain the cosTheta term from rendering equation.
                     px = (
                         0.5f * PdfValue<CosinePdf>(Normalize(rDir)) + 
                         0.5f *
                         PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin));
-                    if (px==0.f)
-                        break;
-                } else {
+                }
+                if ( bJustCosine ) {
                     px = PdfValue<CosinePdf>(Normalize(rDir));
                 }
+                if ( bJustImportance ) {
+                    px = PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin);
+                }
+
+                if (px==0.f) continue;
 
             } else {
                 // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
@@ -522,8 +538,6 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 px=1.f;
             }
 
-            cosTheta=Dot(halfVector,L);
-
             if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
             {
                 // NOTE: the difference here is maybe a little bit subtle. when the surface is perfectly smooth, we
@@ -531,7 +545,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 if (EffectivelySmooth(roughness)){
                     ks_local = SchlickMetal(F0,NdotL,metalness,mat.metalColor);
                     //ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
-                } else if (((Dot(halfVector,V)>0.f)&&cosTheta>0.f)){
+                } else if (((Dot(halfVector,V)>0.f)&&(cosTheta=Dot(halfVector,L))>0.f)){
                     ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
                 } else {
                     break;
@@ -559,15 +573,29 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     brdfTerm = NdotL * Hadamard(kd_local, brdf_diff(mat,rayOrigin));
                 }
 
-                // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
-                radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
+                if constexpr (g_debug_render_kind == debug_render_kind_t::regular) {
+                    // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
+                    radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
+                }
+                if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
+                    radiance += RayCast(world,rayOrigin,L,depth+1);
+                }
             }
-        } // END spawning the bounce rays.
+            break;
+        } while(true); // END spawning the bounce rays.
+        
 
     } // END IF.
     } while(false);
 
-    radiance += mat.emitColor;
+    if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
+        radiance += mat.emitColor;
+    if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
+        float bounceContrib = 1.f / float(MAX_BOUNCE_COUNT);
+        radiance += V3(bounceContrib,bounceContrib,bounceContrib);
+    }
+    if constexpr (g_debug_render_kind == debug_render_kind_t::primary_ray_normals)
+        radiance = 0.5f * N + V3(0.5,0.5,0.5);
 
     return radiance;
 }
