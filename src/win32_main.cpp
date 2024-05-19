@@ -1520,24 +1520,25 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                 .emitColor=V3(15.f,15.f,15.f)};
             nc_sbpush(g_materials,material);
 
-            quad={.point=V3(555,0,0),.u=V3(0,0,555), .v=V3(0,555,0), .matIndex=green};
+            quad={.point=V3(555,0,0),.u=  V3(0,0,555),.v= V3(0,555,0), .matIndex=green}; // Z cross Y equals -X.
             nc_sbpush(g_quads,quad);
 
-            quad={.point=V3(0,0,0),.u=  V3(0,0,555),.v= V3(0,555,0), .matIndex=red};
+            quad={.point=V3(0,0,0),.u=V3(0,555,0), .v=V3(0,0,555), .matIndex=red}; // Y cross Z equals X.
             nc_sbpush(g_quads,quad);
 
             sphere={.p=V3(278,279,554),.r=65,.matIndex= light};
             nc_sbpush(g_spheres,sphere);
 
-            // cornell floor.
-            quad={.point=V3(555,555,555),.u= V3(-555,0,0), .v=V3(0,-555,0),.matIndex= white};
+            // ceiling.
+            quad={.point=V3(0,0,555), .u=V3(0,555,0), .v=V3(555,0,0), .matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // back face wall.
+            // the normal of this wall points towards the camera center, so it is in negative Y direction.
             quad={.point=V3(0,555,0),.u=V3(555,0,0),.v=V3(0,0,555)  ,.matIndex= white};
             nc_sbpush(g_quads,quad);
 
-            // therefore the ceiling.
+            // floor.
             quad={.point=V3(0,0,0),.u= V3(555,0,0),.v=  V3(0,555,0),.matIndex= white};
             nc_sbpush(g_quads,quad);
 
