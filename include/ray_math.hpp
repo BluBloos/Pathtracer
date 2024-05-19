@@ -62,6 +62,14 @@ typedef struct {
     };
 } v3;
 
+inline bool operator==(v3 a, v3 b){
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+inline bool operator!=(v3 a, v3 b){
+    return !(a==b);
+}
+
 inline v3 &operator+=(v3 &a, v3 b) {
     a.x = a.x + b.x;
     a.y = a.y + b.y;

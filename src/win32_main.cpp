@@ -48,6 +48,7 @@ void PrintHelp();
 void DefineCamera(camera_t *c);
 void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
 mipchain_t GenerateMipmapChain(texture_t tex);
+bool IsNotEmissive(const material_t& m);
 
 v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
 float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
@@ -404,7 +405,9 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
       
     material_t mat = world->materials[hitMatIndex];
     do {
-    if (hitMatIndex) {
+    // NOTE: We terminate at emissve materials since the photons originate from these and we are actually tracing
+    // backwards.
+    if (hitMatIndex && IsNotEmissive(mat)) {
 
         float cosTheta,NdotL,NdotV,F0,metalness,roughness;
         v3 halfVector,N,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
@@ -567,6 +570,10 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     radiance += mat.emitColor;
 
     return radiance;
+}
+
+bool IsNotEmissive(const material_t& m){
+    return (m.emitColor==V3(0,0,0));
 }
 
 // TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
