@@ -24,7 +24,7 @@ enum class debug_render_kind_t {
     primary_ray_normals,
     bounce_count
 };
-constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::primary_ray_normals;
+constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::regular;
 
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
