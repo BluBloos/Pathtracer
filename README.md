@@ -12,7 +12,7 @@ approach because I was looking for a coding adventure :)
 
 ![test](https://github.com/BluBloos/Pathtracer/assets/38915815/5c0ad3e0-27ed-46ff-a8ab-6bab018551e5)
 ![test_balls](https://github.com/BluBloos/Pathtracer/assets/38915815/dffa43b0-96ec-4a4e-8481-90217ea9e0c1)
-![test_cornell](https://github.com/BluBloos/Pathtracer/assets/38915815/f08423b5-d18f-4c89-bb5a-0b8d77be6542)
+![test_onewknd](https://github.com/BluBloos/Pathtracer/assets/38915815/9cbaa92f-d464-4c7a-80ab-7ea359e16c3c)
 
 
 # Features
