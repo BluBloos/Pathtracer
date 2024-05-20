@@ -23,6 +23,7 @@ enum class debug_render_kind_t {
     regular,
     primary_ray_normals,
     bounce_count,
+    termination_condition,
     variance
 };
 constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::regular;
@@ -418,10 +419,15 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
       
     material_t mat = world->materials[hitMatIndex];
     v3 N=nextNormal;
+
+    bool bHitSky=hitMatIndex==0;
+    bool bHitLight=!IsNotEmissive(mat);
+    bool bIsTerminalRay = (depth == MAX_BOUNCE_COUNT - 1);
+
     do {
     // NOTE: We terminate at emissve materials since the photons originate from these and we are actually tracing
     // backwards.
-    if (hitMatIndex && IsNotEmissive(mat)) {
+    if (!bHitSky && !bHitLight) {
 
         float cosTheta,NdotL,NdotV,F0,metalness,roughness;
         v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
@@ -583,7 +589,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
                     radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
                 }
-                if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
+                if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count ||
+                              g_debug_render_kind == debug_render_kind_t::termination_condition) {
                     radiance += RayCast(world,rayOrigin,L,depth+1);
                 }
             }
@@ -603,6 +610,14 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     }
     if constexpr (g_debug_render_kind == debug_render_kind_t::primary_ray_normals)
         radiance = 0.5f * N + V3(0.5,0.5,0.5);
+    if constexpr (g_debug_render_kind == debug_render_kind_t::termination_condition) {
+        if (bHitSky)
+            radiance = V3(1,0,0);
+        else if (bHitLight)
+            radiance = V3(0,1,0);
+        else if (bIsTerminalRay)
+            radiance = V3(0,0,1);
+    }
 
     return radiance;
 }
