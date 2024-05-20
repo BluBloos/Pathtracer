@@ -22,9 +22,12 @@
 enum class debug_render_kind_t {
     regular,
     primary_ray_normals,
-    bounce_count
+    bounce_count,
+    variance
 };
 constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::regular;
+
+auto malloc_deleter = [](auto* ptr) { free(ptr); };
 
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
@@ -573,7 +576,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     brdfTerm = NdotL * Hadamard(kd_local, brdf_diff(mat,rayOrigin));
                 }
 
-                if constexpr (g_debug_render_kind == debug_render_kind_t::regular) {
+                if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
+                              g_debug_render_kind == debug_render_kind_t::variance) {
                     // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
                     radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
                 }
@@ -588,7 +592,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     } // END IF.
     } while(false);
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
+    if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
+                  g_debug_render_kind == debug_render_kind_t::variance)
         radiance += mat.emitColor;
     if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
         float bounceContrib = 1.f / float(MAX_BOUNCE_COUNT);
@@ -668,10 +673,18 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                 if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) continue;
 #endif
 
+                constexpr bool bVarRender = g_debug_render_kind == debug_render_kind_t::variance;
+                
                 if ( g_camera.use_pinhole ) {
                     
                     float contrib;
                     v3 rayDirection,filmP,rayOrigin = g_camera.pos;
+
+                    std::unique_ptr<v3, 
+                        /* how does the decltype thing work? well, lambda syntax is shorthand for defining a new functor type.
+                        we use decltype to get that functor type back for giving to the template, as required. */
+                        decltype(malloc_deleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
+                    v3 *vList = vListManager.get();
 
                     contrib = 1.0f / (float)g_pp / (float)g_pp;
                     for (int i = 0;i < g_pp;i++) {
@@ -696,10 +709,22 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
                             if (IsNaN(radiance)) {j--;continue;}//try again.
                             color = color + contrib * radiance;
+                            if constexpr (bVarRender) vList[i * g_pp + j] = radiance;
                         }
                     }
+
+                    if constexpr (bVarRender) {
+                        v3 var=V3(0,0,0);
+                        for (int i=0; i < g_pp * g_pp; i++){
+                            var = var + contrib * Hadamard( vList[i]-color, vList[i]-color );
+                        }
+                        color=var;
+                    }
+
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
                 {
+                    assert(bVarRender==false&&"not supported");
+
                     float contrib = 1.0f / (float)g_pp/(float)g_pp;
 
                     // the poisson disk samples
@@ -756,7 +781,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                     }
                 }
 
-                color=TonemapPass(color);
+                if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
+                    color=TonemapPass(color);
 
                 v4 BMPColor = {
                     255.0f * LinearToSRGB(color.r),
