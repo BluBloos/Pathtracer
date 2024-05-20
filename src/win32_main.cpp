@@ -512,6 +512,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     rDir=RandomToSphere(importantLight, rayOrigin);
                     BuildOrthonormalBasisFromW( direction, &tangentX, &tangentY, &tangentZ );
                 }
+
+                if (rDir==V3(0,0,0)) continue; // e.g., rayOrigin is for some reason inside the sphere.
                 
                 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*tangentZ);
                 L = lobeBounce;    
@@ -1966,17 +1968,26 @@ mipchain_t GenerateMipmapChain(texture_t tex){
 }
 
 // from https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly
+// returns V3(0,0,0) if from is inside the sphere or very close to.
 v3 RandomToSphere(sphere_t sphere, v3 from) {
     float distance_squared = MagnitudeSquared(from-sphere.p);// Square(from.x-sphere.p.x)+Square(from.y-sphere.p.y)+Square(from.z-sphere.p.z);
     assert(distance_squared>0.f);//responsibility of the caller.
 
+    float term1, term2;
+    term1 = 1.f - sphere.r * sphere.r / distance_squared;
+    if (term1 < 0.f) return V3(0.f,0.f,0.f); 
+    assert(term1 >= 0.f);
+
     float r1 = RandomUnilateral();
     float r2 = RandomUnilateral();
-    float z = 1.f + r2*(sqrt(1.f-sphere.r*sphere.r/distance_squared) - 1.f);
+    float z = 1.f + r2*(sqrt(term1) - 1.f);
+
+    term2 = 1 - z * z;
+    assert(term2 >= 0.f);
 
     float phi = 2*PI*r1;
-    float x = cos(phi)*sqrt(1-z*z);
-    float y = sin(phi)*sqrt(1-z*z);
+    float x = cos(phi)*sqrt(term2);
+    float y = sin(phi)*sqrt(term2);
 
     return V3(x, y, z);
 }
