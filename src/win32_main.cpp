@@ -593,6 +593,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
                     radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
                 }
+
                 if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count ||
                               g_debug_render_kind == debug_render_kind_t::termination_condition) {
                     radiance += RayCast(world,rayOrigin,L,depth+1);
@@ -608,12 +609,15 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
                   g_debug_render_kind == debug_render_kind_t::variance)
         radiance += mat.emitColor;
+
     if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
         float bounceContrib = 1.f / float(MAX_BOUNCE_COUNT);
         radiance += V3(bounceContrib,bounceContrib,bounceContrib);
     }
+
     if constexpr (g_debug_render_kind == debug_render_kind_t::primary_ray_normals)
         radiance = 0.5f * N + V3(0.5,0.5,0.5);
+
     if constexpr (g_debug_render_kind == debug_render_kind_t::termination_condition) {
         if (bHitSky)
             radiance = V3(0,0,1);
@@ -632,7 +636,7 @@ bool IsNotEmissive(const material_t& m){
     return (m.emitColor==V3(0,0,0));
 }
 
-// TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
+// TODO: Right now, the image is upside-down. Do we fix this on the application side
 // or is this something that we can fix on the engine side?
 void visualizer(game_memory_t *gameMemory) {
     memcpy((void *)gameMemory->backbufferPixels, g_image.pixelPointer,
@@ -663,7 +667,7 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
     ParseArgs();
 }
 
-// NOTE(Noah): 
+// NOTE: 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
 // 
 // It seems like the threads are overlapping (drawing to same texels).
@@ -818,7 +822,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
             }
             out += g_image.width - texel.width;
         }
-        // TODO(Noah): It seems that the thread continues even after we close the window??
+        // TODO: It seems that the thread continues even after we close the window??
         // (we had prints that were showing) it could be the terminal doing a buffering thing,
         // and just being slow. OR, it could be that the threads are for reals still alive?? 
         // If it is the second one, this is a cause for concern.
@@ -840,7 +844,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
         HANDLE threadHandles[MAX_THREAD_COUNT];
         uint32_t xPos = 0;
         uint32_t yPos = 0;
-        // TODO(Noah): Could do entire image as BSP tree -> assign threads to these regions.
+        // TODO: Could do entire image as BSP tree -> assign threads to these regions.
         // then break up these regions into texels.
         texel_t *texels = nullptr;
         std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
@@ -870,7 +874,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                 if (texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.width) &&
                     texel.yPos >= 0 && (texel.yPos + texel.height <= g_image.height)
                 ) {
-                    if (isPartialTexel) j--; // NOTE(Noah): This is hack ...
+                    if (isPartialTexel) j--; // NOTE: This is hack ...
                     StretchyBufferPush(texels, texel);
                 } else {
 #if 0
@@ -881,7 +885,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                 }
             }
         }
-        // NOTE(Noah): The reason we split up the for-loop is because texels base addr
+        // NOTE: The reason we split up the for-loop is because texels base addr
         // is not stable until we have finished pushing (this is due to stretchy buff logic).
         for (uint32_t i = 0; i < g_tc; i++) {
             texelParams[i] = std::make_tuple(
@@ -1585,7 +1589,15 @@ void LoadWorld(world_kind_t kind, camera_t *c)
         case WORLD_CORNELL_BOX: {
             AddSky(V3(0.f,0.f,0.f));
 
-            unsigned int red   = nc_sbcount(g_materials);
+            int left,/*->*/right,bottom,/*->*/top,front,/*->*/back;
+            left=0;
+            right=800;
+            bottom=0;
+            top=555;
+            front=0;
+            back=555;
+
+            unsigned int red = nc_sbcount(g_materials);
             material={.albedo=(V3(.65, .05, .05))};
             nc_sbpush(g_materials,material);
             unsigned int white = nc_sbcount(g_materials);
@@ -1599,26 +1611,28 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                 .emitColor=V3(15.f,15.f,15.f)};
             nc_sbpush(g_materials,material);
 
-            quad={.point=V3(555,0,0),.u=  V3(0,0,555),.v= V3(0,555,0), .matIndex=green}; // Z cross Y equals -X.
+            // right wall.
+            quad={.point=V3(right,bottom,front),.u=V3(0,0,top-bottom),.v= V3(0,back-front,0), .matIndex=green}; // Z cross Y equals -X.
             nc_sbpush(g_quads,quad);
 
-            quad={.point=V3(0,0,0),.u=V3(0,555,0), .v=V3(0,0,555), .matIndex=red}; // Y cross Z equals X.
+            // left wall.
+            quad={.point=V3(left,bottom,front),.u=V3(0,back-front,0), .v=V3(0,0,top-bottom), .matIndex=red}; // Y cross Z equals X.
             nc_sbpush(g_quads,quad);
 
-            sphere={.p=V3(278,279,554),.r=65,.matIndex= light};
+            sphere={.p=V3((right-left)/2.f,(back-front)/2.f,(top-bottom)/2.f),.r=65,.matIndex= light};
             nc_sbpush(g_spheres,sphere);
 
             // ceiling.
-            quad={.point=V3(0,0,555), .u=V3(0,555,0), .v=V3(555,0,0), .matIndex= white};
+            quad={.point=V3(left,front,top), .u=V3(0,back-front,0), .v=V3(right-left,0,0), .matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // back face wall.
             // the normal of this wall points towards the camera center, so it is in negative Y direction.
-            quad={.point=V3(0,555,0),.u=V3(555,0,0),.v=V3(0,0,555)  ,.matIndex= white};
+            quad={.point=V3(left,back,bottom),.u=V3(right-left,0,0),.v=V3(0,0,top-bottom)  ,.matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // floor.
-            quad={.point=V3(0,0,0),.u= V3(555,0,0),.v=  V3(0,555,0),.matIndex= white};
+            quad={.point=V3(left,bottom,front),.u= V3(right-left,0,0),.v=  V3(0,back-front,0),.matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // cam.aspect_ratio      = 1.0;
@@ -1626,8 +1640,8 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             //cam.samples_per_pixel = 200;
             //cam.max_depth         = 50;
             c->fov =40;
-            c->pos = V3(278, -800, 278 );
-            c->target   = V3(278, 0, 278);
+            c->pos = V3((right-left)/2.f, front-800, (top-bottom)/2.f );
+            c->target   = V3((right-left)/2.f, front, (top-bottom)/2.f);
             // cam.defocus_angle = 0;
         } break;
         // try to roughly match: https://cdn-images-1.medium.com/v2/resize:fit:800/1*IBg4O5MyKVmwyA2DhoBBVA.jpeg.
@@ -2026,7 +2040,7 @@ float RaySphereIntersect(v3 rayOrigin, v3 rayDirection, float minHitDistance, sp
     if (discriminant<0.f)return minHitDistance;
     float rootTerm = SquareRoot(discriminant);
     if (rootTerm > tolerance){
-        // NOTE(Noah): The denominator can never be zero, since we always have a valid direction.
+        // NOTE: The denominator can never be zero, since we always have a valid direction.
         //also note that despite two roots, we don't need to check which is closer. the minus rootTerm
         //will always be closer, since rootTerm is positive.
         float tn = (-b - rootTerm) / denom;
