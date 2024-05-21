@@ -34,7 +34,7 @@ auto malloc_deleter = [](auto* ptr) { free(ptr); };
 #define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
 #define RAYS_PER_PIXEL_MAX 1000              // for antialiasing.
-#define MIN_HIT_DISTANCE float(1e-5)
+#define MIN_HIT_DISTANCE float(1e-4)
 #define WORLD_SIZE 5.0f
 #define LEVELS 6
 #define N_AIR 1.003f
@@ -302,6 +302,9 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     ) {
         quad_t quad = world->quads[quadIndex];
         v3 N=Normalize(Cross(quad.u,quad.v));
+        
+        // TODO: this is a hack to account for our cornell box scene.
+        float minHitDistance = 0.02;
 
         float t=RayIntersectPlanarShape<PLANAR_QUAD>(rayOrigin, rayDirection, minHitDistance, quad.point, quad.u, quad.v);
         if ((t > minHitDistance) && (t < hitDistance)) {
