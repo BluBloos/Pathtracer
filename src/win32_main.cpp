@@ -424,12 +424,14 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     bool bHitLight=!IsNotEmissive(mat);
     bool bIsTerminalRay = (depth == MAX_BOUNCE_COUNT - 1);
 
+    float NdotL,NdotV;
+
     do {
-    // NOTE: We terminate at emissve materials since the photons originate from these and we are actually tracing
+    // NOTE: We terminate at emissive materials since the photons originate from these and we are actually tracing
     // backwards.
     if (!bHitSky && !bHitLight) {
 
-        float cosTheta,NdotL,NdotV,F0,metalness,roughness;
+        float cosTheta,F0,metalness,roughness;
         v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
 
         cosTheta=(Dot(nextNormal, rayDirection));
@@ -480,7 +482,9 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         }
 #endif
 
-        if (Dot(N, V)<=0.f) break;
+        // if we do not support refraction, this should never occur.
+        NdotV=Dot(N, V);
+        if ((NdotV)<=0.f) break;
 
         // Define the local tangent space using the normal.
         BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &tangentZ );
@@ -612,11 +616,13 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         radiance = 0.5f * N + V3(0.5,0.5,0.5);
     if constexpr (g_debug_render_kind == debug_render_kind_t::termination_condition) {
         if (bHitSky)
-            radiance = V3(1,0,0);
+            radiance = V3(0,0,1);
         else if (bHitLight)
             radiance = V3(0,1,0);
         else if (bIsTerminalRay)
-            radiance = V3(0,0,1);
+            radiance = V3(1,0,0);
+        else if (NdotV <= 0.f)
+            radiance = V3(1,1,0);
     }
 
     return radiance;
