@@ -22,15 +22,19 @@
 enum class debug_render_kind_t {
     regular,
     primary_ray_normals,
-    bounce_count
+    bounce_count,
+    termination_condition,
+    variance
 };
-constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::primary_ray_normals;
+constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::regular;
+
+auto malloc_deleter = [](auto* ptr) { free(ptr); };
 
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
 #define RAYS_PER_PIXEL_MAX 1000              // for antialiasing.
-#define MIN_HIT_DISTANCE float(1e-5)
+#define MIN_HIT_DISTANCE float(1e-4)
 #define WORLD_SIZE 5.0f
 #define LEVELS 6
 #define N_AIR 1.003f
@@ -204,7 +208,7 @@ float PdfValue<ToSpherePdf>(v3 dir, sphere_t sphere, v3 from){
     // 0 if direction doesn't intersect with sphere.
     float minHitDistance = MIN_HIT_DISTANCE;
     v3 N;
-    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)==minHitDistance)
+    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)<=minHitDistance)
         return 0.f;
 
     // https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly.
@@ -298,6 +302,9 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     ) {
         quad_t quad = world->quads[quadIndex];
         v3 N=Normalize(Cross(quad.u,quad.v));
+        
+        // TODO: this is a hack to account for our cornell box scene.
+        float minHitDistance = 0.02;
 
         float t=RayIntersectPlanarShape<PLANAR_QUAD>(rayOrigin, rayDirection, minHitDistance, quad.point, quad.u, quad.v);
         if ((t > minHitDistance) && (t < hitDistance)) {
@@ -415,12 +422,19 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
       
     material_t mat = world->materials[hitMatIndex];
     v3 N=nextNormal;
-    do {
-    // NOTE: We terminate at emissve materials since the photons originate from these and we are actually tracing
-    // backwards.
-    if (hitMatIndex && IsNotEmissive(mat)) {
 
-        float cosTheta,NdotL,NdotV,F0,metalness,roughness;
+    bool bHitSky=hitMatIndex==0;
+    bool bHitLight=!IsNotEmissive(mat);
+    bool bIsTerminalRay = (depth == MAX_BOUNCE_COUNT - 1);
+
+    float NdotL,NdotV;
+
+    do {
+    // NOTE: We terminate at emissive materials since the photons originate from these and we are actually tracing
+    // backwards.
+    if (!bHitSky && !bHitLight) {
+
+        float cosTheta,F0,metalness,roughness;
         v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
 
         cosTheta=(Dot(nextNormal, rayDirection));
@@ -471,7 +485,9 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
         }
 #endif
 
-        if (Dot(N, V)<=0.f) break;
+        // if we do not support refraction, this should never occur.
+        NdotV=Dot(N, V);
+        if ((NdotV)<=0.f) break;
 
         // Define the local tangent space using the normal.
         BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &tangentZ );
@@ -509,6 +525,8 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     rDir=RandomToSphere(importantLight, rayOrigin);
                     BuildOrthonormalBasisFromW( direction, &tangentX, &tangentY, &tangentZ );
                 }
+
+                if (rDir==V3(0,0,0)) continue; // e.g., rayOrigin is for some reason inside the sphere.
                 
                 lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*tangentZ);
                 L = lobeBounce;    
@@ -573,11 +591,14 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     brdfTerm = NdotL * Hadamard(kd_local, brdf_diff(mat,rayOrigin));
                 }
 
-                if constexpr (g_debug_render_kind == debug_render_kind_t::regular) {
+                if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
+                              g_debug_render_kind == debug_render_kind_t::variance) {
                     // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
                     radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
                 }
-                if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
+
+                if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count ||
+                              g_debug_render_kind == debug_render_kind_t::termination_condition) {
                     radiance += RayCast(world,rayOrigin,L,depth+1);
                 }
             }
@@ -588,14 +609,28 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     } // END IF.
     } while(false);
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
+    if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
+                  g_debug_render_kind == debug_render_kind_t::variance)
         radiance += mat.emitColor;
+
     if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
         float bounceContrib = 1.f / float(MAX_BOUNCE_COUNT);
         radiance += V3(bounceContrib,bounceContrib,bounceContrib);
     }
+
     if constexpr (g_debug_render_kind == debug_render_kind_t::primary_ray_normals)
         radiance = 0.5f * N + V3(0.5,0.5,0.5);
+
+    if constexpr (g_debug_render_kind == debug_render_kind_t::termination_condition) {
+        if (bHitSky)
+            radiance = V3(0,0,1);
+        else if (bHitLight)
+            radiance = V3(0,1,0);
+        else if (bIsTerminalRay)
+            radiance = V3(1,0,0);
+        else if (NdotV <= 0.f)
+            radiance = V3(1,1,0);
+    }
 
     return radiance;
 }
@@ -604,7 +639,7 @@ bool IsNotEmissive(const material_t& m){
     return (m.emitColor==V3(0,0,0));
 }
 
-// TODO(Noah): Right now, the image is upside-down. Do we fix this on the application side
+// TODO: Right now, the image is upside-down. Do we fix this on the application side
 // or is this something that we can fix on the engine side?
 void visualizer(game_memory_t *gameMemory) {
     memcpy((void *)gameMemory->backbufferPixels, g_image.pixelPointer,
@@ -635,7 +670,7 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
     ParseArgs();
 }
 
-// NOTE(Noah): 
+// NOTE: 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
 // 
 // It seems like the threads are overlapping (drawing to same texels).
@@ -668,10 +703,18 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                 if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) continue;
 #endif
 
+                constexpr bool bVarRender = g_debug_render_kind == debug_render_kind_t::variance;
+                
                 if ( g_camera.use_pinhole ) {
                     
                     float contrib;
                     v3 rayDirection,filmP,rayOrigin = g_camera.pos;
+
+                    std::unique_ptr<v3, 
+                        /* how does the decltype thing work? well, lambda syntax is shorthand for defining a new functor type.
+                        we use decltype to get that functor type back for giving to the template, as required. */
+                        decltype(malloc_deleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
+                    v3 *vList = vListManager.get();
 
                     contrib = 1.0f / (float)g_pp / (float)g_pp;
                     for (int i = 0;i < g_pp;i++) {
@@ -696,10 +739,22 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                             radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
                             if (IsNaN(radiance)) {j--;continue;}//try again.
                             color = color + contrib * radiance;
+                            if constexpr (bVarRender) vList[i * g_pp + j] = radiance;
                         }
                     }
+
+                    if constexpr (bVarRender) {
+                        v3 var=V3(0,0,0);
+                        for (int i=0; i < g_pp * g_pp; i++){
+                            var = var + contrib * Hadamard( vList[i]-color, vList[i]-color );
+                        }
+                        color=var;
+                    }
+
                 } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
                 {
+                    assert(bVarRender==false&&"not supported");
+
                     float contrib = 1.0f / (float)g_pp/(float)g_pp;
 
                     // the poisson disk samples
@@ -756,7 +811,8 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
                     }
                 }
 
-                color=TonemapPass(color);
+                if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
+                    color=TonemapPass(color);
 
                 v4 BMPColor = {
                     255.0f * LinearToSRGB(color.r),
@@ -769,7 +825,7 @@ DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
             }
             out += g_image.width - texel.width;
         }
-        // TODO(Noah): It seems that the thread continues even after we close the window??
+        // TODO: It seems that the thread continues even after we close the window??
         // (we had prints that were showing) it could be the terminal doing a buffering thing,
         // and just being slow. OR, it could be that the threads are for reals still alive?? 
         // If it is the second one, this is a cause for concern.
@@ -791,7 +847,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
         HANDLE threadHandles[MAX_THREAD_COUNT];
         uint32_t xPos = 0;
         uint32_t yPos = 0;
-        // TODO(Noah): Could do entire image as BSP tree -> assign threads to these regions.
+        // TODO: Could do entire image as BSP tree -> assign threads to these regions.
         // then break up these regions into texels.
         texel_t *texels = nullptr;
         std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
@@ -821,7 +877,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                 if (texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.width) &&
                     texel.yPos >= 0 && (texel.yPos + texel.height <= g_image.height)
                 ) {
-                    if (isPartialTexel) j--; // NOTE(Noah): This is hack ...
+                    if (isPartialTexel) j--; // NOTE: This is hack ...
                     StretchyBufferPush(texels, texel);
                 } else {
 #if 0
@@ -832,7 +888,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                 }
             }
         }
-        // NOTE(Noah): The reason we split up the for-loop is because texels base addr
+        // NOTE: The reason we split up the for-loop is because texels base addr
         // is not stable until we have finished pushing (this is due to stretchy buff logic).
         for (uint32_t i = 0; i < g_tc; i++) {
             texelParams[i] = std::make_tuple(
@@ -1536,7 +1592,15 @@ void LoadWorld(world_kind_t kind, camera_t *c)
         case WORLD_CORNELL_BOX: {
             AddSky(V3(0.f,0.f,0.f));
 
-            unsigned int red   = nc_sbcount(g_materials);
+            int left,/*->*/right,bottom,/*->*/top,front,/*->*/back;
+            left=0;
+            right=800;
+            bottom=0;
+            top=555;
+            front=0;
+            back=555;
+
+            unsigned int red = nc_sbcount(g_materials);
             material={.albedo=(V3(.65, .05, .05))};
             nc_sbpush(g_materials,material);
             unsigned int white = nc_sbcount(g_materials);
@@ -1550,26 +1614,28 @@ void LoadWorld(world_kind_t kind, camera_t *c)
                 .emitColor=V3(15.f,15.f,15.f)};
             nc_sbpush(g_materials,material);
 
-            quad={.point=V3(555,0,0),.u=  V3(0,0,555),.v= V3(0,555,0), .matIndex=green}; // Z cross Y equals -X.
+            // right wall.
+            quad={.point=V3(right,bottom,front),.u=V3(0,0,top-bottom),.v= V3(0,back-front,0), .matIndex=green}; // Z cross Y equals -X.
             nc_sbpush(g_quads,quad);
 
-            quad={.point=V3(0,0,0),.u=V3(0,555,0), .v=V3(0,0,555), .matIndex=red}; // Y cross Z equals X.
+            // left wall.
+            quad={.point=V3(left,bottom,front),.u=V3(0,back-front,0), .v=V3(0,0,top-bottom), .matIndex=red}; // Y cross Z equals X.
             nc_sbpush(g_quads,quad);
 
-            sphere={.p=V3(278,279,554),.r=65,.matIndex= light};
+            sphere={.p=V3((right-left)/2.f,(back-front)/2.f,(top-bottom)/2.f),.r=65,.matIndex= light};
             nc_sbpush(g_spheres,sphere);
 
             // ceiling.
-            quad={.point=V3(0,0,555), .u=V3(0,555,0), .v=V3(555,0,0), .matIndex= white};
+            quad={.point=V3(left,front,top), .u=V3(0,back-front,0), .v=V3(right-left,0,0), .matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // back face wall.
             // the normal of this wall points towards the camera center, so it is in negative Y direction.
-            quad={.point=V3(0,555,0),.u=V3(555,0,0),.v=V3(0,0,555)  ,.matIndex= white};
+            quad={.point=V3(left,back,bottom),.u=V3(right-left,0,0),.v=V3(0,0,top-bottom)  ,.matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // floor.
-            quad={.point=V3(0,0,0),.u= V3(555,0,0),.v=  V3(0,555,0),.matIndex= white};
+            quad={.point=V3(left,bottom,front),.u= V3(right-left,0,0),.v=  V3(0,back-front,0),.matIndex= white};
             nc_sbpush(g_quads,quad);
 
             // cam.aspect_ratio      = 1.0;
@@ -1577,8 +1643,8 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             //cam.samples_per_pixel = 200;
             //cam.max_depth         = 50;
             c->fov =40;
-            c->pos = V3(278, -800, 278 );
-            c->target   = V3(278, 0, 278);
+            c->pos = V3((right-left)/2.f, front-800, (top-bottom)/2.f );
+            c->target   = V3((right-left)/2.f, front, (top-bottom)/2.f);
             // cam.defocus_angle = 0;
         } break;
         // try to roughly match: https://cdn-images-1.medium.com/v2/resize:fit:800/1*IBg4O5MyKVmwyA2DhoBBVA.jpeg.
@@ -1940,17 +2006,26 @@ mipchain_t GenerateMipmapChain(texture_t tex){
 }
 
 // from https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly
+// returns V3(0,0,0) if from is inside the sphere or very close to.
 v3 RandomToSphere(sphere_t sphere, v3 from) {
     float distance_squared = MagnitudeSquared(from-sphere.p);// Square(from.x-sphere.p.x)+Square(from.y-sphere.p.y)+Square(from.z-sphere.p.z);
     assert(distance_squared>0.f);//responsibility of the caller.
 
+    float term1, term2;
+    term1 = 1.f - sphere.r * sphere.r / distance_squared;
+    if (term1 < 0.f) return V3(0.f,0.f,0.f); 
+    assert(term1 >= 0.f);
+
     float r1 = RandomUnilateral();
     float r2 = RandomUnilateral();
-    float z = 1.f + r2*(sqrt(1.f-sphere.r*sphere.r/distance_squared) - 1.f);
+    float z = 1.f + r2*(sqrt(term1) - 1.f);
+
+    term2 = 1 - z * z;
+    assert(term2 >= 0.f);
 
     float phi = 2*PI*r1;
-    float x = cos(phi)*sqrt(1-z*z);
-    float y = sin(phi)*sqrt(1-z*z);
+    float x = cos(phi)*sqrt(term2);
+    float y = sin(phi)*sqrt(term2);
 
     return V3(x, y, z);
 }
@@ -1968,7 +2043,7 @@ float RaySphereIntersect(v3 rayOrigin, v3 rayDirection, float minHitDistance, sp
     if (discriminant<0.f)return minHitDistance;
     float rootTerm = SquareRoot(discriminant);
     if (rootTerm > tolerance){
-        // NOTE(Noah): The denominator can never be zero, since we always have a valid direction.
+        // NOTE: The denominator can never be zero, since we always have a valid direction.
         //also note that despite two roots, we don't need to check which is closer. the minus rootTerm
         //will always be closer, since rootTerm is positive.
         float tn = (-b - rootTerm) / denom;
