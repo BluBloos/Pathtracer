@@ -208,7 +208,7 @@ float PdfValue<ToSpherePdf>(v3 dir, sphere_t sphere, v3 from){
     // 0 if direction doesn't intersect with sphere.
     float minHitDistance = MIN_HIT_DISTANCE;
     v3 N;
-    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)==minHitDistance)
+    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)<=minHitDistance)
         return 0.f;
 
     // https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly.
