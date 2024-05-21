@@ -202,15 +202,15 @@ inline unsigned int BGRAPack4x8(v4 unpacked) {
 }
 
 inline float Magnitude(v3 a) {
-    float result;
-    result = SquareRoot(a.x * a.x + a.y * a.y + a.z * a.z);
+    float result=a.x * a.x + a.y * a.y + a.z * a.z;
+    assert(result>=0.f);
+    result = SquareRoot(result);
     return result;
 }
 
-// TODO(Noah): What if the vector I am trying to normalize
-// is (0, 0, 0)? Will get divide error here! this is very very bad!
 inline v3 Normalize(v3 a) {
     float magnitude = Magnitude(a);
+    assert(magnitude>0.f);
     a.x /= magnitude;
     a.y /= magnitude;
     a.z /= magnitude;
