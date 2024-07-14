@@ -1,9 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "ray.hpp"
-#include <automata_engine.h>
+#include <automata_engine.hpp>
 #include <windows.h>
-#include <gist/github/nc_stretchy_buffers.h>
 
 #define CGLTF_IMPLEMENTATION
 #include "external/cgltf.h"
@@ -44,7 +43,7 @@ auto malloc_deleter = [](auto* ptr) { free(ptr); };
 static v3 TonemapPass(v3 pixel);
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
 static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
-void visualizer(game_memory_t *gameMemory);
+void visualizer(ae::game_memory_t *gameMemory);
 DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
 DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
 rtas_node_t GenerateAccelerationStructure(world_t *world);
@@ -641,7 +640,7 @@ bool IsNotEmissive(const material_t& m){
 
 // TODO: Right now, the image is upside-down. Do we fix this on the application side
 // or is this something that we can fix on the engine side?
-void visualizer(game_memory_t *gameMemory) {
+void visualizer(ae::game_memory_t *gameMemory) {
     memcpy((void *)gameMemory->backbufferPixels, g_image.pixelPointer,
         sizeof(uint32_t) * gameMemory->backbufferWidth * gameMemory->backbufferHeight);
 
@@ -655,15 +654,38 @@ void visualizer(game_memory_t *gameMemory) {
     }
 }
 
-void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw, int nh) { 
+void automata_engine::HandleWindowResize(ae::game_memory_t *gameMemory, int nw, int nh) { 
     // nothing to see here, folks.
 }
 
-void automata_engine::Close(game_memory_t *gameMemory) { 
+void automata_engine::Close(ae::game_memory_t *gameMemory) { 
     // nothing to see here, folks.
 }
 
-void automata_engine::PreInit(game_memory_t *gameMemory) {
+void __cdecl automata_engine::InitAsync(struct automata_engine::game_memory_t *gameMemory)
+{
+
+    gameMemory->setInitialized(true);
+
+    g_masterThreadHandle = CreateThread(
+        nullptr,
+        0, // default stack size.
+        master_thread,
+        nullptr,
+        0, // thread runs immediately after creation.
+        nullptr
+    );
+
+
+}
+
+void __cdecl automata_engine::OnVoiceBufferProcess(struct automata_engine::game_memory_t*, __int64, float*, float*, unsigned int, int, int)
+{
+}
+
+void __cdecl automata_engine::OnVoiceBufferEnd(struct automata_engine::game_memory_t*, __int64){}
+
+void automata_engine::PreInit(ae::game_memory_t *gameMemory) {
     ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
     ae::defaultWindowName = "Raytracer";
 
@@ -920,7 +942,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
     ExitThread(0);
 }
 
-void automata_engine::Init(game_memory_t *gameMemory) {
+void automata_engine::Init(ae::game_memory_t *gameMemory) {
     printf("Doing stuff...\n");
     game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
     g_image = AllocateImage(winInfo.width, winInfo.height);    
@@ -930,20 +952,19 @@ void automata_engine::Init(game_memory_t *gameMemory) {
     DefineCamera(&g_camera);
 
     automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
-    g_masterThreadHandle=CreateThread(
-        nullptr,
-        0, // default stack size.
-        master_thread,
-        nullptr,
-        0, // thread runs immediately after creation.
-        nullptr
-    );
 }
 
 rtas_node_t GenerateAccelerationStructure(world_t *world)
 {
     rtas_node_t accel;
     void AdoptChildren(rtas_node_t &node, rtas_node_t B);
+
+    // early exit if the scene does not contain meshes.
+    if (nc_sbcount(world->meshes) == 0)
+    {
+        accel.triangleCount = 0;
+        return accel;
+    }
 
     float sep = WORLD_SIZE / float(1<<LEVELS);
     int leavesCount, nodesCount, halfLeavesCount;
@@ -1915,11 +1936,11 @@ void DefineCamera(camera_t *c) {
 
     // print infos.
     {
-        PlatformLoggerLog("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
-        PlatformLoggerLog("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
-        PlatformLoggerLog("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
-        PlatformLoggerLog("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
-        PlatformLoggerLog(
+        AELoggerLog("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
+        AELoggerLog("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
+        AELoggerLog("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
+        AELoggerLog("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
+        AELoggerLog(
         "c->axisX and Y define the plane where the film plane is embedded.\n"
         "rays are shot originating from the film and through the lens located at c->pos.\n"
         "the camera has a local coordinate system which is different from the world coordinate system.\n");
