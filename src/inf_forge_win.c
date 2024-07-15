@@ -84,10 +84,44 @@ IF_BOOL IF_win_get_message(IF_window_handle_t hdl, IF_winmsg_t *if_msg)
 
     if (ret > 0) {
         TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        DispatchMessageA(&msg); // dispatch message to window procedure.
     }
 
     return ret != 0;
+}
+
+IF_BOOL IF_win_poll_message(IF_window_handle_t hdl, IF_winmsg_t *if_msg)
+{
+    MSG msg;
+    IF_zero(msg);
+
+    LPMSG lpMsg = &msg;
+    HWND  hWnd = (HWND)hdl.opaque_handle;
+    // if If wMsgFilterMin and wMsgFilterMax are both zero, PeekMessage returns 
+    // all available messages (that is, no range filtering is performed).
+    UINT  wMsgFilterMin = 0;
+    UINT  wMsgFilterMax = 0;
+    UINT  wRemoveMsg = PM_REMOVE;
+
+    BOOL ret = PeekMessageA(
+        lpMsg,
+        hWnd,
+        wMsgFilterMin,
+        wMsgFilterMax,
+        wRemoveMsg
+    );
+
+    if_msg->isvalid = ret;
+
+    if (if_msg->isvalid) {
+
+        if (msg.message == WM_QUIT) return FALSE;
+
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg); // dispatch message to window procedure.
+    }
+
+    return TRUE;
 }
 
 // this function cannot be called from a DLL because then the classatom
@@ -286,4 +320,26 @@ void IF_swap_window_buffers_after_vsync(IF_window_handle_t hdl)
 IF_V1 void *IF_malloc(int bytes)
 {
     return VirtualAlloc(0, bytes, MEM_COMMIT, PAGE_READWRITE);
+}
+
+IF_V1 double IF_get_hdwclock_frequency()
+{
+    LONGLONG           elapsed = 0;
+    DWORD64           cpubegin = __rdtsc();
+
+    LARGE_INTEGER begin;
+    QueryPerformanceCounter(&begin);  // .QuadPart;
+
+    LARGE_INTEGER os_clocks_for_one_second;
+    QueryPerformanceFrequency(&os_clocks_for_one_second);
+
+    while (elapsed < os_clocks_for_one_second.QuadPart)
+    {
+        LARGE_INTEGER curr;
+        QueryPerformanceCounter(&curr);
+        elapsed = curr.QuadPart - begin.QuadPart;
+    }
+
+    DWORD64 cpuend = __rdtsc();
+    return cpuend - cpubegin;
 }

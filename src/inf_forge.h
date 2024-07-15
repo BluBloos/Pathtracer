@@ -63,6 +63,7 @@ typedef enum {
 
 typedef struct {
     IF_winmsg_kind_e code;
+    IF_BOOL isvalid;
 } IF_winmsg_t;
 
 typedef struct {
@@ -96,7 +97,12 @@ IF_API IF_glob_t *IF_glob();
 IF_API IF_error_e IF_get_lasterror();
 
 
-// --- UTILITY FUNCTIONS ---
+// --- TIMING FUNCTIONS ---
+// returns rdtsc clocks for one second period.
+double IF_get_hdwclock_frequency();
+
+
+// --- MEMORY BLOCK FUNCTIONS ---
 #define IF_zero(lval) memset(&lval, 0, sizeof(lval))
 /*C8
 void IF_zero<typename T>( T *lval )
@@ -114,7 +120,7 @@ IF_API IF_thread_t IF_launch(IF_func);
 // --- INPUT FUNCTIONS ---
 // returns false if the message has code == IF_WIN_MSG_QUIT.
 IF_API IF_BOOL IF_win_get_message(IF_window_handle_t, IF_winmsg_t *);
-
+IF_BOOL IF_win_poll_message(IF_window_handle_t, IF_winmsg_t *);
 
 // --- WINDOW FUNCTIONS ---
 // IF_create_window is not thread safe (hopefully you weren't thinking of doing
