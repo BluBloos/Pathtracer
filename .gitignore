@@ -9,3 +9,5 @@ gist/github
 *.exe
 *.ilk
 *.pdb
+
+*.rdi
