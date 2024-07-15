@@ -4,3 +4,8 @@ data/
 gist/github
 ./**/*.bmp
 *.bmp
+
+*.obj
+*.exe
+*.ilk
+*.pdb

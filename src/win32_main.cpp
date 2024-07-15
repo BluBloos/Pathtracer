@@ -1,13 +1,15 @@
+#include "inf_forge.h" // for the windowing/platform code.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include "ray.hpp"
-#include <automata_engine.hpp>
+//#include <automata_engine.hpp>
 #include <windows.h>
 
 #define CGLTF_IMPLEMENTATION
 #include "external/cgltf.h"
 
-//#define STB_IMAGE_IMPLEMENTATION, already defined in the engine translation unit.
+#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
 #define NC_DS_IMPLEMENTATION
@@ -40,12 +42,13 @@ auto malloc_deleter = [](auto* ptr) { free(ptr); };
 #define FIXED_FOCAL_LENGTH 0.098f
 #define MIN_ROUGHNESS float(0.01f)
 
+DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
+DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
+image_32_t AllocateImage(unsigned int width, unsigned int height);
+
 static v3 TonemapPass(v3 pixel);
 static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
 static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
-void visualizer(ae::game_memory_t *gameMemory);
-DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
-DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
 rtas_node_t GenerateAccelerationStructure(world_t *world);
 void LoadGltf();
 void LoadBespokeTextures();
@@ -185,6 +188,65 @@ FUTURE WORK:
 - I could read Lee et al. 2017 to determine that I don't need to bilinear filter the texture maps.
 - look into ray differentials for generically determine the gradients required to select the mip level. 
 */
+
+
+void main() 
+{
+    const int w = 800;
+    const int h = 450;
+    IF_window_handle_t window = IF_create_window(w, h, "Pathtracer");
+
+//    ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
+
+    ParseArgs();
+
+    printf("Doing stuff...\n");
+
+    IF_rect_t clientarea = IF_get_window_clientarea(window);
+    g_image = AllocateImage(clientarea.width, clientarea.height);
+    
+    LoadWorld(g_worldKind, &g_camera);
+
+    // define camera and characteristics
+    DefineCamera(&g_camera);
+
+    // spawn the render thread.
+    g_masterThreadHandle = CreateThread(
+        nullptr,
+        0, // default stack size.
+        master_thread,
+        nullptr,
+        0, // thread runs immediately after creation.
+        nullptr
+    );
+
+    // handle window messages and visualize the render while it's doing the 
+    // thing.
+    IF_winmsg_t msg;
+    while ( IF_win_get_message(window, &msg) ) // poll_message will not block.
+    {
+        // handle the message.
+        switch(msg.code) {
+
+        }
+
+        IF_texture_info_t backbufferinfo;
+        backbufferinfo.format = IF_TEXTURE_FORMAT_RGBA8;
+        backbufferinfo.width = g_image.width;
+        backbufferinfo.height = g_image.height;
+
+        IF_blit_to_window_surface( window, g_image.pixelPointer, 
+            &backbufferinfo );
+
+        DWORD result = WaitForSingleObject( g_masterThreadHandle, 0);
+        if (result == WAIT_OBJECT_0) break;
+        else {
+            // the thread handle is not signaled - the thread is still alive
+        }
+
+    }
+
+}
 
 // okay, this is really bad from, but depending on the template argument (which Pdf to eval),
 // the func signature is going to change. in CosinePdf we pass dir in tangent space.
@@ -638,60 +700,6 @@ bool IsNotEmissive(const material_t& m){
     return (m.emitColor==V3(0,0,0));
 }
 
-// TODO: Right now, the image is upside-down. Do we fix this on the application side
-// or is this something that we can fix on the engine side?
-void visualizer(ae::game_memory_t *gameMemory) {
-    memcpy((void *)gameMemory->backbufferPixels, g_image.pixelPointer,
-        sizeof(uint32_t) * gameMemory->backbufferWidth * gameMemory->backbufferHeight);
-
-    DWORD result = WaitForSingleObject( g_masterThreadHandle, 0);
-    if (result == WAIT_OBJECT_0) {
-//        setGlobalRunning
-        automata_engine::setGlobalRunning(false);// platform::GLOBAL_RUNNING=false;
-    }
-    else {
-        // the thread handle is not signaled - the thread is still alive
-    }
-}
-
-void automata_engine::HandleWindowResize(ae::game_memory_t *gameMemory, int nw, int nh) { 
-    // nothing to see here, folks.
-}
-
-void automata_engine::Close(ae::game_memory_t *gameMemory) { 
-    // nothing to see here, folks.
-}
-
-void __cdecl automata_engine::InitAsync(struct automata_engine::game_memory_t *gameMemory)
-{
-
-    gameMemory->setInitialized(true);
-
-    g_masterThreadHandle = CreateThread(
-        nullptr,
-        0, // default stack size.
-        master_thread,
-        nullptr,
-        0, // thread runs immediately after creation.
-        nullptr
-    );
-
-
-}
-
-void __cdecl automata_engine::OnVoiceBufferProcess(struct automata_engine::game_memory_t*, __int64, float*, float*, unsigned int, int, int)
-{
-}
-
-void __cdecl automata_engine::OnVoiceBufferEnd(struct automata_engine::game_memory_t*, __int64){}
-
-void automata_engine::PreInit(ae::game_memory_t *gameMemory) {
-    ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
-    ae::defaultWindowName = "Raytracer";
-
-    ParseArgs();
-}
-
 // NOTE: 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
 // 
@@ -900,7 +908,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                     texel.yPos >= 0 && (texel.yPos + texel.height <= g_image.height)
                 ) {
                     if (isPartialTexel) j--; // NOTE: This is hack ...
-                    StretchyBufferPush(texels, texel);
+                    nc_sbpush(texels, texel);
                 } else {
 #if 0
                     PlatformLoggerWarn("found invalid texel:");
@@ -916,7 +924,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
             texelParams[i] = std::make_tuple(
                 texels + i * maxTexelsPerThread,
                 (i + 1 < g_tc) ? maxTexelsPerThread :
-                StretchyBufferCount(texels) - (g_tc - 1) * maxTexelsPerThread
+                nc_sbcount(texels) - (g_tc - 1) * maxTexelsPerThread
             );
             threadHandles[i] = CreateThread(
                 nullptr,
@@ -931,7 +939,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
         for (uint32_t i = 0; i < g_tc; i++) {
             WaitForSingleObject(threadHandles[i], INFINITE);
         }
-        StretchyBufferFree(texels);
+        nc_sbfree(texels);
     }
 
 #undef PIXELS_PER_TEXEL
@@ -940,18 +948,6 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
     WriteImage(g_image, "test.bmp",bFlip);
     printf("Done. Image written to test.bmp\n");
     ExitThread(0);
-}
-
-void automata_engine::Init(ae::game_memory_t *gameMemory) {
-    printf("Doing stuff...\n");
-    game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
-    g_image = AllocateImage(winInfo.width, winInfo.height);    
-    
-    LoadWorld(g_worldKind,&g_camera);
-    // define camera and characteristics
-    DefineCamera(&g_camera);
-
-    automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
 }
 
 rtas_node_t GenerateAccelerationStructure(world_t *world)
@@ -1936,11 +1932,11 @@ void DefineCamera(camera_t *c) {
 
     // print infos.
     {
-        AELoggerLog("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
-        AELoggerLog("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
-        AELoggerLog("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
-        AELoggerLog("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
-        AELoggerLog(
+        printf("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
+        printf("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
+        printf("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
+        printf("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
+        printf(
         "c->axisX and Y define the plane where the film plane is embedded.\n"
         "rays are shot originating from the film and through the lens located at c->pos.\n"
         "the camera has a local coordinate system which is different from the world coordinate system.\n");
