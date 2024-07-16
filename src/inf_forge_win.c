@@ -290,6 +290,8 @@ IF_V1 void IF_blit_to_window_surface(IF_window_handle_t hdl, void *pixels,
     GetClientRect(hwnd, &rect);
 
     BITMAPINFO info;
+    IF_zero(info);
+
     info.bmiHeader.biSize = sizeof(info.bmiHeader);
 	info.bmiHeader.biWidth = pixels_info->width;
 	info.bmiHeader.biHeight = pixels_info->height;
