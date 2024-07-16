@@ -299,8 +299,9 @@ IF_V1 void IF_blit_to_window_surface(IF_window_handle_t hdl, void *pixels,
 	info.bmiHeader.biBitCount = 32;
 	info.bmiHeader.biCompression = BI_RGB;
 
-    HDC              hdc = GetWindowDC(hwnd); // TODO: does this need to be     
-                                              // more robust in some way?
+    // NOTE: it is important here that we do not use GetWindowDC,
+    // as this returns a device context including the nonclient areas!
+    HDC              hdc = GetDC(hwnd);
     int              xDest = 0;
     int              yDest = 0;
     int              DestWidth = rect.right - rect.left;
