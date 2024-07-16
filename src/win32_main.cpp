@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "ray.hpp"
-//#include <automata_engine.hpp>
 #include <windows.h>
 
 #define CGLTF_IMPLEMENTATION
@@ -27,10 +26,62 @@ enum class debug_render_kind_t {
     termination_condition,
     variance
 };
-constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::regular;
 
-auto malloc_deleter = [](auto* ptr) { free(ptr); };
 
+// PROGRAM SETUP.
+void ParseArgs();
+void PrintHelp();
+
+// SCENE SETUP.
+void LoadWorld(world_kind_t kind,camera_t *c);
+void DefineCamera(camera_t *c);
+void LoadGltf();
+void LoadBespokeTextures();
+rtas_node_t GenerateAccelerationStructure(world_t *world);
+
+// PROGRAM FLOW FUNCTIONS.
+DWORD WINAPI RenderThread(_In_ LPVOID lpParameter);
+DWORD WINAPI MasterThread(_In_ LPVOID lpParameter);
+void RenderTexel( unsigned int *pixel_pointer, texel_t texel );
+
+// GEOMETRICAL HELPER FUNCTIONS.
+bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &
+    refractionDir );
+void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
+float RaySphereIntersect(v3 origin, v3 direction, float minHitDistance,     
+    sphere_t sphere, v3 *normal);
+v3 RandomToSphere(sphere_t sphere, v3 from);
+v3 RandomHalfVectorGGX(float roughness);
+v3 RandomCosineDirectionHemisphere();
+v3 RandomDirectionHemisphere();
+static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, 
+    const v3 &rayDirection);
+
+// MISC HELPER FUNCTIONS.
+image_32_t AllocateImage(unsigned int width, unsigned int height);
+mipchain_t GenerateMipmapChain(texture_t tex);
+/*
+beware to the unitiated - this function takes "uv",but the value should range 
+from 0->size, not 0->1. 
+*/
+v3 SampleTexture(texture_t tex, v2 uv);
+v3 BespokeSampleTexture(texture_t tex, v2 uv);
+
+// CORE PATH TRACER ALGORITHM.
+v3 BrdfDiff(material_t &mat,v3 surfPt);
+v3 BrdfSpecular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, 
+    float roughness);
+static v3 TonemapPass(v3 pixel);
+v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
+float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
+float GGX(v3 N, v3 H, float roughness);
+float BurleyParameterization(float roughness);
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
+bool EffectivelySmooth(float roughness);
+bool IsNotEmissive(const material_t& m);
+
+
+// GLOBALS
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
@@ -41,42 +92,6 @@ auto malloc_deleter = [](auto* ptr) { free(ptr); };
 #define N_AIR 1.003f
 #define FIXED_FOCAL_LENGTH 0.098f
 #define MIN_ROUGHNESS float(0.01f)
-
-DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
-DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
-image_32_t AllocateImage(unsigned int width, unsigned int height);
-
-static v3 TonemapPass(v3 pixel);
-static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
-static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
-rtas_node_t GenerateAccelerationStructure(world_t *world);
-void LoadGltf();
-void LoadBespokeTextures();
-bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
-v3 brdf_diff(material_t &mat,v3 surfPt);
-v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness);
-v3 SampleTexture(texture_t tex, v2 uv);//beware to the unitiated - this function takes "uv",but the value should range from 0->size, not 0->1.
-v3 BespokeSampleTexture(texture_t tex, v2 uv);
-bool EffectivelySmooth(float roughness);
-void LoadWorld(world_kind_t kind,camera_t *c);
-void ParseArgs();
-void PrintHelp();
-void DefineCamera(camera_t *c);
-void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
-mipchain_t GenerateMipmapChain(texture_t tex);
-bool IsNotEmissive(const material_t& m);
-
-v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
-float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
-float GGX(v3 N, v3 H, float roughness);
-float BurleyParameterization(float roughness);
-
-v3 RandomToSphere(sphere_t sphere, v3 from);
-v3 RandomHalfVectorGGX(float roughness);
-v3 RandomCosineDirectionHemisphere();
-v3 RandomDirectionHemisphere();
-
-float RaySphereIntersect(v3 origin, v3 direction, float minHitDistance, sphere_t sphere, v3 *normal);
 
 static world_t g_world = {};
 static camera_t g_camera = {};
@@ -105,6 +120,11 @@ static bool g_use_pinhole;
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
 extern int __argc;
 extern char ** __argv;
+
+constexpr debug_render_kind_t g_debug_render_kind = 
+    debug_render_kind_t::regular;
+
+auto malloc_deleter = [](auto* ptr) { free(ptr); };
 
 /*
 Hierarchy of work:
@@ -222,7 +242,7 @@ void main()
     g_masterThreadHandle = CreateThread(
         nullptr,
         0, // default stack size.
-        master_thread,
+        MasterThread,
         nullptr,
         0, // thread runs immediately after creation.
         nullptr
@@ -658,10 +678,10 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     //and therefore,
                     // we don't need an estimator either. We just take the term.
                 } else if (bSpecular) {
-                    // NOTE: for specular, the 1/p(x) term is baked into brdf_specular.
-                    brdfTerm = Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector, roughness ) );
+                    // NOTE: for specular, the 1/p(x) term is baked into BrdfSpecular.
+                    brdfTerm = Hadamard(ks_local, BrdfSpecular(mat,rayOrigin, N, L, V, halfVector, roughness ) );
                 } else {
-                    brdfTerm = NdotL * Hadamard(kd_local, brdf_diff(mat,rayOrigin));
+                    brdfTerm = NdotL * Hadamard(kd_local, BrdfDiff(mat,rayOrigin));
                 }
 
                 if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
@@ -712,6 +732,7 @@ bool IsNotEmissive(const material_t& m){
     return (m.emitColor==V3(0,0,0));
 }
 
+
 // NOTE: 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
 // 
@@ -723,159 +744,25 @@ bool IsNotEmissive(const material_t& m){
 // In fact, this is exactly what is happening. we pass a pointer, which is going to be the same one
 // every time and the threads are all in the same virtual memory space. So next time thru the loop,
 // the texels arr is updated for all threads.
-DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
+DWORD WINAPI RenderThread(_In_ LPVOID lpParameter)
+{
     std::tuple<texel_t *, uint32_t> *ptr_to_tuple = 
         (std::tuple<texel_t *, uint32_t> *)lpParameter;
     texel_t *texels = std::get<0>(*ptr_to_tuple);
-    for (uint32_t i = 0; i < std::get<1>(*ptr_to_tuple); i++) {
+
+    for (uint32_t i = 0; i < std::get<1>(*ptr_to_tuple); i++)
+    {
         texel_t texel = texels[i];
-        unsigned int *out = g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
-        // Raytracer works by averaging all colors from all rays shot from this pixel.
-        for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++) {
-            float filmY = -1.0f + 2.0f * (float)y / (float)g_image.height;
-            for (unsigned int x = texel.xPos; x < (texel.width + texel.xPos); x++) {
-                
-                // filmX and filmY are values in the range [-1,1].
-                float filmX = -1.0f + 2.0f * (float)x / (float)g_image.width;
+        unsigned int *out =
+            g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
 
-                v3 color = {};
-                v3 radiance={};
-
-#if DEBUG_MIDDLE_PIXEL
-                if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) continue;
-#endif
-
-                constexpr bool bVarRender = g_debug_render_kind == debug_render_kind_t::variance;
-                
-                if ( g_camera.use_pinhole ) {
-                    
-                    float contrib;
-                    v3 rayDirection,filmP,rayOrigin = g_camera.pos;
-
-                    std::unique_ptr<v3, 
-                        /* how does the decltype thing work? well, lambda syntax is shorthand for defining a new functor type.
-                        we use decltype to get that functor type back for giving to the template, as required. */
-                        decltype(malloc_deleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
-                    v3 *vList = vListManager.get();
-
-                    contrib = 1.0f / (float)g_pp / (float)g_pp;
-                    for (int i = 0;i < g_pp;i++) {
-                        for (int j = 0;j < g_pp;j++) {
-
-                            float llpixelX = filmX - 1.f * g_camera.halfFilmPixelW;
-                            float llpixelY = filmY - 1.f * g_camera.halfFilmPixelH;
-                            float stepX = 1.f / g_pp * g_camera.halfFilmPixelW*2.f;
-                            float stepY = 1.f / g_pp * g_camera.halfFilmPixelH*2.f;
-                            //float halfStep = step / 2.f;
-                            float xStep = llpixelX + float(i) / g_pp * g_camera.halfFilmPixelW + stepX*0.5f;
-                            float yStep = llpixelY + float(j) / g_pp * g_camera.halfFilmPixelH + stepY*0.5f;
-                           
-                            xStep += (RandomUnilateral() - 0.5f) * stepX;
-                            yStep += (RandomUnilateral() - 0.5f) * stepY;
-
-                            filmP = g_camera.filmCenter + 
-                                ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
-                                ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
-                            rayDirection = Normalize(filmP - g_camera.pos);
-
-                            radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
-                            if (IsNaN(radiance)) {j--;continue;}//try again.
-                            color = color + contrib * radiance;
-                            if constexpr (bVarRender) vList[i * g_pp + j] = radiance;
-                        }
-                    }
-
-                    if constexpr (bVarRender) {
-                        v3 var=V3(0,0,0);
-                        for (int i=0; i < g_pp * g_pp; i++){
-                            var = var + contrib * Hadamard( vList[i]-color, vList[i]-color );
-                        }
-                        color=var;
-                    }
-
-                } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
-                {
-                    assert(bVarRender==false&&"not supported");
-
-                    float contrib = 1.0f / (float)g_pp/(float)g_pp;
-
-                    // the poisson disk samples
-                    const int NUM_SAMPLES = 12;     // the number of samples to take.
-                    //const float PI = 3.14159265359f; // the value of PI.
-                    static const v2 poissonDisk[NUM_SAMPLES] = {
-                        V2(0.0, 0.0),
-                        V2(-0.94201624, -0.39906216),
-                        V2(0.94558609, -0.76890725),
-                        V2(-0.094184101, -0.92938870),
-                        V2(0.34495938, 0.29387760),
-                        V2(-0.91588581, 0.45771432),
-                        V2(-0.81544232, -0.87912464),
-                        V2(-0.38277543, 0.27676845),
-                        V2(0.97484398, 0.75648379),
-                        V2(0.44323325, -0.97511554),
-                        V2(0.53742981, -0.47373420),
-                        V2(-0.26496911, -0.41893023)
-                    };
-
-                    for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) { // integrate across image sensor.
-                        
-                        float offX = filmX + (RandomBilateral() * g_camera.halfFilmPixelW);
-                        float offY = filmY + (RandomBilateral() * g_camera.halfFilmPixelH);
-                        v3 filmP = g_camera.filmCenter + (offX * g_camera.halfFilmWidth * g_camera.axisX) + (offY * g_camera.halfFilmHeight * g_camera.axisY);
-                        v3 rayOrigin = g_camera.pos;
-                        v3 rayDirection = Normalize(g_camera.pos-filmP);
-
-                        // intersect with focal plane.
-                        // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
-                        // 1/f = 1/v + 1/b.
-                        float focalPlaneDist = 1.f/(1.f/FIXED_FOCAL_LENGTH - 1.f/g_camera.focalLength);
-                        v3 planePoint,N= g_camera.axisZ,focalPoint;
-                        planePoint = g_camera.pos + g_camera.axisX + focalPlaneDist*N;
-                        float d = Dot(N,planePoint);
-
-                        float t=RayIntersectPlane(rayOrigin, rayDirection, N, d, MIN_HIT_DISTANCE);
-                        assert(t!=MIN_HIT_DISTANCE);
-
-                        focalPoint=rayOrigin+t*rayDirection;
-
-                        // sample poisson disk point.
-                        for (unsigned int rayIndex2 = 0; rayIndex2 < g_pp; rayIndex2++) {
-
-                            v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
-                            v3 rayOriginDisk,rayDirectionDisk;
-                            rayOriginDisk = rayOrigin + diskSample.x*g_camera.aperatureRadius*g_camera.axisX + diskSample.y*g_camera.aperatureRadius*g_camera.axisY;
-                            rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
-
-                            radiance=RayCast(&g_world, rayOriginDisk, rayDirectionDisk, 0);
-                            if (IsNaN(radiance)) {rayIndex2--;continue;}//try again.
-                            color = color + contrib * radiance;
-                        }
-                    }
-                }
-
-                if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
-                    color=TonemapPass(color);
-
-                v4 BMPColor = {
-                    255.0f * LinearToSRGB(color.r),
-                    255.0f * LinearToSRGB(color.g),
-                    255.0f * LinearToSRGB(color.b), 
-                    255.0f
-                }; 
-                unsigned int BMPValue = BGRAPack4x8(BMPColor);
-                *out++ = BMPValue; // ARGB
-            }
-            out += g_image.width - texel.width;
-        }
-        // TODO: It seems that the thread continues even after we close the window??
-        // (we had prints that were showing) it could be the terminal doing a buffering thing,
-        // and just being slow. OR, it could be that the threads are for reals still alive?? 
-        // If it is the second one, this is a cause for concern.
+        RenderTexel( out, texel );
     }
+
     ExitThread(0);
 }
 
-DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
+DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
 
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
 
@@ -922,10 +809,10 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
                     if (isPartialTexel) j--; // NOTE: This is hack ...
                     nc_sbpush(texels, texel);
                 } else {
-#if 0
-                    PlatformLoggerWarn("found invalid texel:");
-                    PlatformLoggerLog("with x: %d", texel.xPos);
-                    PlatformLoggerLog("with y: %d", texel.yPos);
+#if 1
+                    printf("found invalid texel:");
+                    printf("with x: %d, ", texel.xPos);
+                    printf("with y: %d\n", texel.yPos);
 #endif
                 }
             }
@@ -941,7 +828,7 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
             threadHandles[i] = CreateThread(
                 nullptr,
                 0, // default stack size.
-                render_thread,
+                RenderThread,
                 (LPVOID)&texelParams[i],
                 0, // thread runs immediately after creation.
                 nullptr
@@ -960,6 +847,156 @@ DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
     WriteImage(g_image, "test.bmp",bFlip);
     printf("Done. Image written to test.bmp\n");
     ExitThread(0);
+}
+
+// render a texl on the film plane.
+void RenderTexel( unsigned int *out, texel_t texel )
+{
+    // Raytracer works by averaging all colors from all rays shot from this 
+    // pixel.
+
+    for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++) {
+        float filmY = -1.0f + 2.0f * (float)y / (float)g_image.height;
+
+        for (
+            unsigned int x = texel.xPos;
+            x < (texel.width + texel.xPos); x++) 
+        {
+            
+            // filmX and filmY are values in the range [-1,1].
+            float filmX = -1.0f + 2.0f * (float)x / (float)g_image.width;
+
+            v3 color = {};
+            v3 radiance = {};
+
+#if DEBUG_MIDDLE_PIXEL
+            if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) 
+                continue;
+#endif
+
+            constexpr bool bVarRender = g_debug_render_kind == 
+                debug_render_kind_t::variance;
+            
+            if ( g_camera.use_pinhole ) {
+                
+                float contrib;
+                v3 rayDirection,filmP,rayOrigin = g_camera.pos;
+
+                std::unique_ptr<v3, 
+                    /* how does the decltype thing work? well, lambda syntax is shorthand for defining a new functor type.
+                    we use decltype to get that functor type back for giving to the template, as required. */
+                    decltype(malloc_deleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
+                v3 *vList = vListManager.get();
+
+                contrib = 1.0f / (float)g_pp / (float)g_pp;
+                for (int i = 0;i < g_pp;i++) {
+                    for (int j = 0;j < g_pp;j++) {
+
+                        float llpixelX = filmX - 1.f * g_camera.halfFilmPixelW;
+                        float llpixelY = filmY - 1.f * g_camera.halfFilmPixelH;
+                        float stepX = 1.f / g_pp * g_camera.halfFilmPixelW*2.f;
+                        float stepY = 1.f / g_pp * g_camera.halfFilmPixelH*2.f;
+                        //float halfStep = step / 2.f;
+                        float xStep = llpixelX + float(i) / g_pp * g_camera.halfFilmPixelW + stepX*0.5f;
+                        float yStep = llpixelY + float(j) / g_pp * g_camera.halfFilmPixelH + stepY*0.5f;
+                        
+                        xStep += (RandomUnilateral() - 0.5f) * stepX;
+                        yStep += (RandomUnilateral() - 0.5f) * stepY;
+
+                        filmP = g_camera.filmCenter + 
+                            ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
+                            ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
+                        rayDirection = Normalize(filmP - g_camera.pos);
+
+                        radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
+                        if (IsNaN(radiance)) {j--;continue;}//try again.
+                        color = color + contrib * radiance;
+                        if constexpr (bVarRender) vList[i * g_pp + j] = radiance;
+                    }
+                }
+
+                if constexpr (bVarRender) {
+                    v3 var=V3(0,0,0);
+                    for (int i=0; i < g_pp * g_pp; i++){
+                        var = var + contrib * Hadamard( vList[i]-color, vList[i]-color );
+                    }
+                    color=var;
+                }
+
+            } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
+            {
+                assert(bVarRender==false&&"not supported");
+
+                float contrib = 1.0f / (float)g_pp/(float)g_pp;
+
+                // the poisson disk samples
+                const int NUM_SAMPLES = 12;     // the number of samples to take.
+                //const float PI = 3.14159265359f; // the value of PI.
+                static const v2 poissonDisk[NUM_SAMPLES] = {
+                    V2(0.0, 0.0),
+                    V2(-0.94201624, -0.39906216),
+                    V2(0.94558609, -0.76890725),
+                    V2(-0.094184101, -0.92938870),
+                    V2(0.34495938, 0.29387760),
+                    V2(-0.91588581, 0.45771432),
+                    V2(-0.81544232, -0.87912464),
+                    V2(-0.38277543, 0.27676845),
+                    V2(0.97484398, 0.75648379),
+                    V2(0.44323325, -0.97511554),
+                    V2(0.53742981, -0.47373420),
+                    V2(-0.26496911, -0.41893023)
+                };
+
+                for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) { // integrate across image sensor.
+                    
+                    float offX = filmX + (RandomBilateral() * g_camera.halfFilmPixelW);
+                    float offY = filmY + (RandomBilateral() * g_camera.halfFilmPixelH);
+                    v3 filmP = g_camera.filmCenter + (offX * g_camera.halfFilmWidth * g_camera.axisX) + (offY * g_camera.halfFilmHeight * g_camera.axisY);
+                    v3 rayOrigin = g_camera.pos;
+                    v3 rayDirection = Normalize(g_camera.pos-filmP);
+
+                    // intersect with focal plane.
+                    // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
+                    // 1/f = 1/v + 1/b.
+                    float focalPlaneDist = 1.f/(1.f/FIXED_FOCAL_LENGTH - 1.f/g_camera.focalLength);
+                    v3 planePoint,N= g_camera.axisZ,focalPoint;
+                    planePoint = g_camera.pos + g_camera.axisX + focalPlaneDist*N;
+                    float d = Dot(N,planePoint);
+
+                    float t=RayIntersectPlane(rayOrigin, rayDirection, N, d, MIN_HIT_DISTANCE);
+                    assert(t!=MIN_HIT_DISTANCE);
+
+                    focalPoint=rayOrigin+t*rayDirection;
+
+                    // sample poisson disk point.
+                    for (unsigned int rayIndex2 = 0; rayIndex2 < g_pp; rayIndex2++) {
+
+                        v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
+                        v3 rayOriginDisk,rayDirectionDisk;
+                        rayOriginDisk = rayOrigin + diskSample.x*g_camera.aperatureRadius*g_camera.axisX + diskSample.y*g_camera.aperatureRadius*g_camera.axisY;
+                        rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
+
+                        radiance=RayCast(&g_world, rayOriginDisk, rayDirectionDisk, 0);
+                        if (IsNaN(radiance)) {rayIndex2--;continue;}//try again.
+                        color = color + contrib * radiance;
+                    }
+                }
+            }
+
+            if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
+                color=TonemapPass(color);
+
+            v4 BMPColor = {
+                255.0f * LinearToSRGB(color.r),
+                255.0f * LinearToSRGB(color.g),
+                255.0f * LinearToSRGB(color.b), 
+                255.0f
+            }; 
+            unsigned int BMPValue = BGRAPack4x8(BMPColor);
+            *out++ = BMPValue; // ARGB
+        }
+        out += g_image.width - texel.width;
+    }
 }
 
 rtas_node_t GenerateAccelerationStructure(world_t *world)
@@ -1369,7 +1406,7 @@ void LoadGltf()
     } while(0);
 }
 
-v3 brdf_diff(material_t &mat, v3 surfPoint)
+v3 BrdfDiff(material_t &mat, v3 surfPoint)
 {
     float piTerm=1.f/PI;
     if (mat.albedoIdx==0) {
@@ -1384,7 +1421,7 @@ v3 brdf_diff(material_t &mat, v3 surfPoint)
     return piTerm*V3(1.f,1.f,1.f);
 }
 
-v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness)
+v3 BrdfSpecular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness)
 {
     // Via the material mapping (might be UVs or some other function), sample the texture.
     v2 uv = {surfPoint.x,surfPoint.y};//for now.
