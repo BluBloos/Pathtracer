@@ -1,8 +1,5 @@
-bin/
-build
-data/
-gist/github
-./**/*.bmp
+
+
 *.bmp
 
 *.obj
@@ -11,3 +8,5 @@ gist/github
 *.pdb
 
 *.rdi
+
+.vscode
