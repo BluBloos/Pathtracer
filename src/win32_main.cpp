@@ -200,9 +200,14 @@ void main()
 
     const int w = 1280;
     const int h = 720;
-    IF_window_handle_t window = IF_create_window(w, h, "Pathtracer");
 
-//    ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
+    IF_create_window_info_t info = {};
+    info.width = w;
+    info.height = h;
+    info.title = "Pathtracer";
+    info.flags = IF_CREATE_WINDOW_NORESIZE;
+
+    IF_window_handle_t window = IF_create_window_ex(&info);
 
     IF_rect_t ca = IF_get_window_clientarea(window);
 

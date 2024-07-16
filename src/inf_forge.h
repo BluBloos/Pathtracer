@@ -61,6 +61,18 @@ typedef enum {
     IF_WIN_MSG_QUIT
 } IF_winmsg_kind_e;
 
+enum {
+    IF_CREATE_WINDOW_NORESIZE = 1 << 0,
+};
+
+typedef unsigned long long IF_create_window_flags_t;
+
+typedef struct {
+    int width, height;
+    const char *title;
+    IF_create_window_flags_t flags;
+} IF_create_window_info_t;
+
 typedef struct {
     IF_winmsg_kind_e code;
     IF_BOOL isvalid;
@@ -129,6 +141,7 @@ IF_BOOL IF_win_poll_message(IF_window_handle_t, IF_winmsg_t *);
 // Do not call IF_create_window from a DLL.
 IF_API IF_window_handle_t IF_create_window(int width, int height, const char 
     *title);
+IF_API IF_window_handle_t IF_create_window_ex(IF_create_window_info_t *);
 IF_API void IF_close_window(IF_window_handle_t);
 IF_API IF_rect_t IF_get_window_clientarea(IF_window_handle_t); 
                                     // not always equal to requested window 

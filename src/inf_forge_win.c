@@ -124,12 +124,14 @@ IF_BOOL IF_win_poll_message(IF_window_handle_t hdl, IF_winmsg_t *if_msg)
     return TRUE;
 }
 
-// this function cannot be called from a DLL because then the classatom
-// will _not_ be automatically unregistered when the application terminates.
-IF_V1 IF_window_handle_t IF_create_window(int width, int height, char *title)
+IF_API IF_window_handle_t IF_create_window_ex(IF_create_window_info_t *pinfo)
 {
     IF_window_handle_t hdl;
     IF_zero(hdl);
+
+    int width = pinfo->width;
+    int height = pinfo->height;
+    const char *title = pinfo->title;
 
     BOOL CALLBACK win32_monitor_enum_proc(HMONITOR, HDC, LPRECT, LPARAM);
     LRESULT CALLBACK win32_window_proc(HWND, UINT, WPARAM, LPARAM);
@@ -168,7 +170,10 @@ IF_V1 IF_window_handle_t IF_create_window(int width, int height, char *title)
 
 
     DWORD       dwExStyle   = 0;
-    DWORD       dwStyle = (WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+
+    DWORD dwStyle = (WS_OVERLAPPEDWINDOW | WS_VISIBLE) &
+        (( pinfo->flags & IF_CREATE_WINDOW_NORESIZE) ?
+        (~WS_MAXIMIZEBOX & ~WS_THICKFRAME) : (DWORD)(0xFFFFFFFF));
 
     HWND      hWndParent = NULL;
     HMENU     hMenu = NULL;
@@ -211,6 +216,21 @@ IF_V1 IF_window_handle_t IF_create_window(int width, int height, char *title)
     hdl.opaque_handle = (void*)nativehandle;
 
     return hdl;
+}
+
+// this function cannot be called from a DLL because then the classatom
+// will _not_ be automatically unregistered when the application terminates.
+IF_V1 IF_window_handle_t IF_create_window(int width, int height, char *title)
+{
+    IF_create_window_info_t info;
+    IF_zero(info);
+
+    info.width = width;
+    info.height = height;
+    info.title = title;
+
+    return IF_create_window_ex(&info);
+
 }
 
 IF_V1 static BOOL CALLBACK win32_monitor_enum_proc(HMONITOR hmon, HDC hdc, LPRECT lprc_monitor, LPARAM pData)
