@@ -196,37 +196,21 @@ int g_backbuffer_height;
 
 void main() 
 {
-    //double clockrate = IF_get_hdwclock_frequency();
     ParseArgs();
 
-    const int w = 800;
-    const int h = 450;
+    const int w = 1280;
+    const int h = 720;
     IF_window_handle_t window = IF_create_window(w, h, "Pathtracer");
 
 //    ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
 
-
-
-    printf("Doing stuff...\n");
-
     IF_rect_t ca = IF_get_window_clientarea(window);
 
-    printf("AllocateImage...\n");
     g_image = AllocateImage(ca.width, ca.height);
 
-/*
-    // create the backbuffer.
-    g_backbuffer = (unsigned int*)IF_malloc( sizeof(unsigned int) * ca.width *
-        ca.height ); 
-    g_backbuffer_width = ca.width;
-    g_backbuffer_height = ca.height;
-  */
-
-    printf("LoadWorld...\n");
     LoadWorld(g_worldKind, &g_camera);
 
     // define camera and characteristics
-    printf("DefineCamera...\n");
     DefineCamera(&g_camera);
 
     // spawn the render thread.
@@ -246,19 +230,10 @@ void main()
     while ( IF_win_poll_message(window, &msg) ) // poll_message will not block.
     {
 
-       // DWORD64 time = __rdtsc();
-       // double timeseconds =  time / clockrate;
-
         // handle the message.
         if (msg.isvalid) switch(msg.code) {
 
         }
-
-#if 0
-        // copy over data.
-        memcpy((void *)g_backbuffer, g_image.pixelPointer,
-            sizeof(uint32_t) * g_backbuffer_width * g_backbuffer_height);
-#endif
 
         IF_texture_info_t backbufferinfo;
         backbufferinfo.format = IF_TEXTURE_FORMAT_RGBA8;
@@ -267,11 +242,6 @@ void main()
 
         IF_blit_to_window_surface( window, g_image.pixelPointer, 
             &backbufferinfo );
-
-/*
-        printf("executed IF_blit_to_window_surface for the %d time at time %f" 
-            "seconds\n", i++, timeseconds);
-*/
 
         DWORD result = WaitForSingleObject( g_masterThreadHandle, 0);
         if (result == WAIT_OBJECT_0) break;
@@ -1616,7 +1586,6 @@ void LoadWorld(world_kind_t kind, camera_t *c)
             sphere={.p = V3(0,0,-1000),.r = 1000,.matIndex = planeMat};
             nc_sbpush(g_spheres,sphere);
             
-            printf("LoadBespokeTextures...\n");
             LoadBespokeTextures();
 
             unsigned int mat = nc_sbcount(g_materials);
