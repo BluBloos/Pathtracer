@@ -19,13 +19,13 @@
 #define DEBUG_JUST_COSINE  0
 #define DEBUG_JUST_IMPORTANT_LIGHT 0
 
-enum class debug_render_kind_t {
+typedef enum class debug_render_kind {
     regular,
     primary_ray_normals,
     bounce_count,
     termination_condition,
     variance
-};
+} debug_render_kind_t;
 
 
 // PROGRAM SETUP.
@@ -121,10 +121,10 @@ static bool g_use_pinhole;
 extern int __argc;
 extern char ** __argv;
 
-constexpr debug_render_kind_t g_debug_render_kind = 
+constexpr debug_render_kind_t g_debugRenderKind = 
     debug_render_kind_t::regular;
 
-auto malloc_deleter = [](auto* ptr) { free(ptr); };
+auto MallocDeleter = [](auto* ptr) { free(ptr); };
 
 /*
 Hierarchy of work:
@@ -209,10 +209,6 @@ FUTURE WORK:
 - look into ray differentials for generically determine the gradients required to select the mip level. 
 */
 
-unsigned int *g_backbuffer = NULL;
-int g_backbuffer_width;
-int g_backbuffer_height;
-
 
 void main() 
 {
@@ -281,32 +277,36 @@ void main()
 }
 
 // okay, this is really bad from, but depending on the template argument (which Pdf to eval),
-// the func signature is going to change. in CosinePdf we pass dir in tangent space.
+// the func signature is going to change. in COSINE_PDF we pass dir in tangent space.
 // whereas in PdfValue we pass dir in global.
 
-constexpr int CosinePdf=0;
-constexpr int ToSpherePdf=1;
+constexpr int COSINE_PDF=0;
+constexpr int TO_SPHERE_PDF=1;
 
 template<int Pdf>
-float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f)){
-    switch(Pdf){
-        case CosinePdf: return max(0.f,Dot(V3(0,0,1), dir)/PI); break;
+float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f))
+{
+    switch(Pdf) {
+        case COSINE_PDF: return max(0.f,Dot(V3(0,0,1), dir)/PI); break;
         default: assert(false);//not supported.
     }
 }
 
 template<>
-float PdfValue<ToSpherePdf>(v3 dir, sphere_t sphere, v3 from){
-
+float PdfValue<TO_SPHERE_PDF>(v3 dir, sphere_t sphere, v3 from)
+{
     // 0 if direction doesn't intersect with sphere.
     float minHitDistance = MIN_HIT_DISTANCE;
     v3 N;
-    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)<=minHitDistance)
-        return 0.f;
+
+    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)
+        <= minHitDistance) return 0.f;
 
     // https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly.
-    float cos_theta_max = sqrt(1.f - sphere.r*sphere.r/MagnitudeSquared( from - sphere.p ));
-    float solid_angle = 2.f*PI*(1.f-cos_theta_max);
+    float cosThetaMax = sqrt(1.f - sphere.r*sphere.r/MagnitudeSquared( from - 
+        sphere.p ));
+    float solid_angle = 2.f*PI*(1.f-cosThetaMax);
+
     return  1.f / solid_angle;
 }
 
@@ -314,20 +314,29 @@ static unsigned int GetTotalPixelSize(image_32_t image) {
     return image.height * image.width * sizeof(unsigned int);
 }
 
-static image_32_t AllocateImage(unsigned int width, unsigned int height) {
+static image_32_t AllocateImage(unsigned int width, unsigned int height)
+{
     image_32_t newImage = {};
+
     newImage.width = width;
     newImage.height = height;
     unsigned int totalPixelSize = GetTotalPixelSize(newImage);
     newImage.pixelPointer = (unsigned int *)malloc(totalPixelSize);
+
     return newImage;
 }
 
-static void WriteImage(image_32_t image, const char *fileName, bool bFlip=false) {
+static void WriteImage(image_32_t image, const char *fileName, bool 
+    bFlip=false) 
+{
     void *pixels;
     unsigned int outputPixelSize = GetTotalPixelSize(image);
     pixels = malloc(outputPixelSize);
-    if (pixels==NULL) { fprintf(stderr, "[ERROR] Unable to write output file,malloc error.\n");return; }
+
+    if (pixels==NULL) { 
+        fprintf(stderr, "[ERROR] Unable to write output file,malloc error.\n");return; 
+    }
+
     bitmap_header_t header = {};
     header.FileType = 0x4D42;   
     header.FileSize = sizeof(bitmap_header_t) + outputPixelSize;
@@ -337,14 +346,20 @@ static void WriteImage(image_32_t image, const char *fileName, bool bFlip=false)
     header.Height = image.height;
     header.Planes = 1;          
     header.BitsPerPixel = 32;    
+
     FILE *fileHandle = fopen(fileName, "wb");
+
     if(fileHandle) {
         fwrite(&header, sizeof(header), 1, fileHandle);
+
         if (bFlip) {
-            for ( unsigned int *pi=image.pixelPointer+image.width*image.height-1, *pp=(unsigned int*)pixels;pi>=image.pixelPointer; )
-                *pp++=*pi--;
+            for ( 
+                unsigned int *pi=image.pixelPointer+image.width*image.height-1, 
+                *pp=(unsigned int*)pixels;pi>=image.pixelPointer; ) *pp++=*pi--;
+            
             fwrite(pixels, outputPixelSize, 1, fileHandle);
         } else fwrite(image.pixelPointer, outputPixelSize, 1, fileHandle);
+
         fclose(fileHandle);
     }
     else {
@@ -353,19 +368,25 @@ static void WriteImage(image_32_t image, const char *fileName, bool bFlip=false)
 }
 
 // helper function to make it a single line.
-bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, aabb_t box)
+bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, 
+    aabb_t box)
 {
     bool exitedEarly;
     int faceHitIdx;
-    float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
-    return t!=minHitDistance;
+
+    float t = RayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, 
+        box, &exitedEarly, &faceHitIdx);
+
+    return t != minHitDistance;
 }
 
-static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection) {
+static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, 
+    const v3 &rayDirection)
+{
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
-    ray_payload_t p={};
-    p.hitDistance=FLT_MAX;
-    p.hitMatIndex=0;
+    ray_payload_t p = {};
+    p.hitDistance = FLT_MAX;
+    p.hitMatIndex = 0;
     float &hitDistance = p.hitDistance;
     unsigned int &hitMatIndex = p.hitMatIndex;
     v3 &nextNormal = p.normal;
@@ -379,8 +400,10 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         sphere_t sphere = world->spheres[sphereIndex];
         float t;
         v3 N;
-        if ((t=RaySphereIntersect(rayOrigin, rayDirection, minHitDistance, sphere, &N))>minHitDistance &&
-            t < hitDistance) {
+
+        if ((t = RaySphereIntersect(rayOrigin, rayDirection, minHitDistance, 
+            sphere, &N)) > minHitDistance && t < hitDistance) 
+        {
             hitDistance = t;
             hitMatIndex = sphere.matIndex;
             nextNormal=N;
@@ -394,12 +417,14 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         quadIndex++
     ) {
         quad_t quad = world->quads[quadIndex];
-        v3 N=Normalize(Cross(quad.u,quad.v));
+        v3 N = Normalize(Cross(quad.u,quad.v));
         
         // TODO: this is a hack to account for our cornell box scene.
         float minHitDistance = 0.02;
 
-        float t=RayIntersectPlanarShape<PLANAR_QUAD>(rayOrigin, rayDirection, minHitDistance, quad.point, quad.u, quad.v);
+        float t = RayIntersectPlanarShape<PLANAR_QUAD>(rayOrigin, rayDirection, 
+            minHitDistance, quad.point, quad.u, quad.v);
+
         if ((t > minHitDistance) && (t < hitDistance)) {
             hitDistance = t;
             hitMatIndex = quad.matIndex;
@@ -414,7 +439,9 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         planeIndex++
     ) {
         plane_t plane = world->planes[planeIndex];
-        float t=RayIntersectPlane(rayOrigin, rayDirection, plane.n, plane.d, minHitDistance);
+        float t = RayIntersectPlane(rayOrigin, rayDirection, plane.n, plane.d, 
+            minHitDistance);
+
         if ((t > minHitDistance) && (t < hitDistance)) {
             hitDistance = t;
             hitMatIndex = plane.matIndex;
@@ -425,10 +452,10 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     // intersection test with the triangles in the world (via an acceleration structure).
     {
         rtas_node_t &rtas = world->rtas;
-
-        static thread_local  stack_t<rtas_node_t*> nodes={};
-        if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, rtas.bounds))
-            nc_spush(nodes, &rtas);
+        static thread_local  stack_t<rtas_node_t*> nodes = {};
+ 
+        if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, 
+            rayDirection, minHitDistance, rtas.bounds)) nc_spush(nodes, &rtas);
 
         mesh_t &mesh = world->meshes[0];
 
@@ -436,30 +463,38 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         {
             rtas_node_t *r = nc_spop(nodes);
             if (r->children)
-                for (int i=0;i<nc_sbcount(r->children);i++)
+                for (int i = 0; i < nc_sbcount(r->children); i++)
                 {
                     rtas_node_t *c = &r->children[i];
-                    if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, c->bounds))
-                        nc_spush(nodes, c);
+
+                    if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, 
+                        rayDirection, minHitDistance, c->bounds))
+                    nc_spush(nodes, c);
                 }
             else // leaf
                 for (int i=0;i<r->triangleCount;i++)
                 {
                     int triIndex = r->triangles[i];
                     v3 *points = &mesh.points[triIndex*3];
+
                     v3 A,B,C,u,v;
-                    A=points[0];
-                    B=points[1];
-                    C=points[2];
+                    A = points[0];
+                    B = points[1];
+                    C = points[2];
+
                     v3 n = Normalize( Cross( u=B-A, v=C-A ) );
-                    float t=RayIntersectPlanarShape<PLANAR_TRIANGLE>(rayOrigin, rayDirection, minHitDistance, A, u, v);
+
+                    float t = 
+                        RayIntersectPlanarShape<PLANAR_TRIANGLE>(rayOrigin, 
+                            rayDirection, minHitDistance, A, u, v);
+
                     // hit.
                     if ((t > minHitDistance) && (t < hitDistance)) {
                         hitDistance = t;
 #if 0
                         hitMatIndex = r->bounds.matIndex; // debug.
 #else
-                    hitMatIndex = mesh.matIndices[triIndex*3];
+                        hitMatIndex = mesh.matIndices[triIndex*3];
 #endif
                         nextNormal = n;
                     }
@@ -477,13 +512,14 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
 
         bool exitedEarly;
         int faceHitIdx;
-        // NOTE: the faceNormals array was copied directly from within doesRayIntersectWithAABB2.
+        // NOTE: the faceNormals array was copied directly from within RayIntersectWithAABB2.
         // this is some garbage and not clean code. 
         constexpr v3 faceNormals[] = {
             // front, back, left, right, top, bottom.
             {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
         };
-        float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
+        float t = RayIntersectWithAABB2(rayOrigin, rayDirection, 
+            minHitDistance, box, &exitedEarly, &faceHitIdx);
 
         // check hit.
         if ((t > minHitDistance) && (t < hitDistance)) {
@@ -502,76 +538,82 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     v3 rayOrigin, rayDirection;
 
     v3 radiance = {};
-    if (depth>=MAX_BOUNCE_COUNT) return radiance;
+    if (depth >= MAX_BOUNCE_COUNT) return radiance;
 
-    rayOrigin=o;
-    rayDirection=d;
+    rayOrigin = o;
+    rayDirection = d;
 
     ray_payload_t p;
     float &hitDistance = p.hitDistance;
     unsigned int &hitMatIndex = p.hitMatIndex;
     v3 &nextNormal = p.normal;
-    p=RayCastIntersect(world, rayOrigin, rayDirection);
+
+    p = RayCastIntersect(world, rayOrigin, rayDirection);
       
     material_t mat = world->materials[hitMatIndex];
     v3 N=nextNormal;
 
-    bool bHitSky=hitMatIndex==0;
-    bool bHitLight=!IsNotEmissive(mat);
+    bool bHitSky = (hitMatIndex==0);
+    bool bHitLight = !IsNotEmissive(mat);
     bool bIsTerminalRay = (depth == MAX_BOUNCE_COUNT - 1);
 
-    float NdotL,NdotV;
+    float NdotL, NdotV;
 
     do {
-    // NOTE: We terminate at emissive materials since the photons originate from these and we are actually tracing
-    // backwards.
-    if (!bHitSky && !bHitLight) {
+
+        // NOTE: We terminate at emissive materials since the photons originate 
+        // from these and we are actually tracing
+        // backwards.
+        if (bHitSky || bHitLight) break;
 
         float cosTheta,F0,metalness,roughness;
-        v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
+        v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,
+            tangentY,tangentZ;
 
-        cosTheta=(Dot(nextNormal, rayDirection));
-        cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
+        cosTheta = (Dot(nextNormal, rayDirection));
+        cosTheta = (cosTheta>0.f) ? Dot(-1.f*nextNormal, rayDirection) : 
+            cosTheta;
 
-        F0 = Square((N_AIR-mat.ior)/(N_AIR+mat.ior)); // NOTE: need to change when support refraction again.
+        F0 = Square((N_AIR-mat.ior)/(N_AIR+mat.ior)); // NOTE: need to change 
+        // when support refraction again.
 
         int tapCount = g_sc;
         //float tapContrib = 1.f / float(tapCount + nc_sbcount(world->lights));
-        float tapContrib=1.f/tapCount;
+        float tapContrib = 1.f/tapCount;
 
         rayOrigin = rayOrigin + hitDistance * rayDirection;
         pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
 
-        V=-rayDirection;
+        V = -rayDirection;
 
         // Via the material mapping (might be UVs or some other function), sample the texture.
         v2 uv = {rayOrigin.x,rayOrigin.y};//for now.
 
         { // find the metalness.
             if (mat.metalnessIdx==0 || !g_bMetalness) {
-                metalness=mat.metalness;
+                metalness = mat.metalness;
             } else {
-                mipchain_t chain=g_textures[mat.metalnessIdx-1];
-                texture_t tex=chain.mips[0];
+                mipchain_t chain = g_textures[mat.metalnessIdx-1];
+                texture_t tex = chain.mips[0];
                 r3 = BespokeSampleTexture( tex, uv );
-                metalness=r3.x;
+                metalness = r3.x;
             }
         }
 
         if (mat.roughnessIdx==0 || !g_bRoughness) {
-            roughness=mat.roughness;
+            roughness = mat.roughness;
         } else {
-            mipchain_t chain=g_textures[mat.roughnessIdx-1];
-            texture_t tex=chain.mips[0];
+            mipchain_t chain = g_textures[mat.roughnessIdx-1];
+            texture_t tex = chain.mips[0];
             v3 r3 = BespokeSampleTexture(tex, uv );
-            roughness=r3.x;
+            roughness = r3.x;
         }
 
 #if 1
         // find the normal.
         if (g_bNormals && mat.normalIdx!=0){
-            mipchain_t chain=g_textures[mat.normalIdx-1];
-            texture_t tex=chain.mips[0];
+            mipchain_t chain = g_textures[mat.normalIdx-1];
+            texture_t tex = chain.mips[0];
             N = BespokeSampleTexture(tex, uv );
             // NOTE: this currently only works for the ground plane, since it's normal happens to be up!
             N = Normalize(2.f*N - V3(1.f,1.f,1.f));
@@ -579,19 +621,23 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
 #endif
 
         // if we do not support refraction, this should never occur.
-        NdotV=Dot(N, V);
+        NdotV = Dot(N, V);
         if ((NdotV)<=0.f) break;
 
         // Define the local tangent space using the normal.
         BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &tangentZ );
 
         // use monte carlo estimator.
-        const bool bJustCosine=DEBUG_JUST_COSINE || (g_worldKind==WORLD_RAYTRACING_ONE_WEEKEND);
+        const bool bJustCosine=DEBUG_JUST_COSINE || 
+            (g_worldKind==WORLD_RAYTRACING_ONE_WEEKEND);
         constexpr bool bJustImportance=DEBUG_JUST_IMPORTANT_LIGHT;
-        assert( !(bJustImportance && bJustCosine) && "they can't both be true." );
+        assert( !(bJustImportance && bJustCosine) &&
+             "they can't both be true." );
+
         do {
-            bool bSpecular=RandomUnilateral()>0.5f;
+            bool bSpecular = RandomUnilateral()>0.5f;
             float px;
+
             // the code below is somewhat nuanced. we use a correction weight. what is the "correction weight"?
             // well, the total brdf term is specular+diffuse. so, we can split that integral into two,
             // because integrals are linear. thus, what was a single statistical estimator before is
@@ -601,69 +647,87 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
             // business that we're doing here.
 
             if (bSpecular && EffectivelySmooth(roughness)) {
-                L=pureBounce;
-                px=1.f;
-            } else if (!bSpecular) {
+                L = pureBounce;
+                px = 1.f;
+            }
+            else if (!bSpecular) {
 
                 bool bSampleCosine = RandomUnilateral()>0.5f;
+
                 //hittable_t importantLight; // Three cases. 1: sample sphere. 2. sample square light. 3. sample nothing,because there is no light.
                 //assert(incomingLight)
-                sphere_t importantLight=world->spheres[0];//for now, this only works for some scenes.
+
+                sphere_t importantLight = world->spheres[0];//for now, this 
+                //only works for some scenes.
+
                 v3 rDir,lobeBounce;
+
                 if ( !bJustImportance && (bSampleCosine || bJustCosine) )
                 {
                     rDir=RandomCosineDirectionHemisphere();   
-                } else if ( !bJustCosine && (!bSampleCosine || bJustImportance) ) {
+                } 
+                else if ( !bJustCosine && (!bSampleCosine || bJustImportance) ) 
+                {
                     v3 direction = importantLight.p - rayOrigin;
-                    rDir=RandomToSphere(importantLight, rayOrigin);
-                    BuildOrthonormalBasisFromW( direction, &tangentX, &tangentY, &tangentZ );
+                    rDir = RandomToSphere(importantLight, rayOrigin);
+                    BuildOrthonormalBasisFromW( direction, &tangentX, &
+                        tangentY, &tangentZ );
                 }
 
                 if (rDir==V3(0,0,0)) continue; // e.g., rayOrigin is for some reason inside the sphere.
                 
-                lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*tangentZ);
-                L = lobeBounce;    
-                halfVector =(1.f/Magnitude(L+V)) * (L+V);
+                lobeBounce = Normalize(rDir.x * tangentX + rDir.y * 
+                    tangentY + rDir.z * tangentZ);
+                L = lobeBounce;
+                halfVector = (1.f/Magnitude(L+V)) * (L+V);
 
                 if ( !bJustCosine && !bJustImportance ) {
                     // Now that we are using a pdf mixture, it's important to retain the cosTheta term from rendering equation.
-                    px = (
-                        0.5f * PdfValue<CosinePdf>(Normalize(rDir)) + 
-                        0.5f *
-                        PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin));
+                    px = 0.5f * PdfValue<COSINE_PDF>(Normalize(rDir)) + 
+                        0.5f * PdfValue<TO_SPHERE_PDF>(lobeBounce,
+                            importantLight, rayOrigin);
                 }
+
                 if ( bJustCosine ) {
-                    px = PdfValue<CosinePdf>(Normalize(rDir));
+                    px = PdfValue<COSINE_PDF>(Normalize(rDir));
                 }
+
                 if ( bJustImportance ) {
-                    px = PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin);
+                    px = PdfValue<TO_SPHERE_PDF>(lobeBounce,importantLight,rayOrigin);
                 }
 
                 if (px==0.f) continue;
 
             } else {
                 // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
-                v3 rDir= RandomHalfVectorGGX(roughness);
-                halfVector=Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
+                v3 rDir = RandomHalfVectorGGX(roughness);
+                halfVector = Normalize( rDir.x * tangentX + rDir.y * 
+                    tangentY + rDir.z * N);
                 L = 2.f * (Dot(V, halfVector)) * halfVector - V;
-                px=1.f;
+                px = 1.f;
             }
 
-            if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
+            if ( (NdotL=Dot(N, L))>0.f )  //incoming light is in hemisphere.
             {
                 // NOTE: the difference here is maybe a little bit subtle. when the surface is perfectly smooth, we
                 // don't require microfacet theory. thus, we won't be using the half vector.
-                if (EffectivelySmooth(roughness)){
+
+                if (EffectivelySmooth(roughness)) {
                     ks_local = SchlickMetal(F0,NdotL,metalness,mat.metalColor);
                     //ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
-                } else if (((Dot(halfVector,V)>0.f)&&(cosTheta=Dot(halfVector,L))>0.f)){
-                    ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
+                } 
+                else if ( ((Dot(halfVector,V) > 0.f) && 
+                    (cosTheta = Dot(halfVector,L)) >0.f) )
+                {
+                    ks_local = SchlickMetal(F0,cosTheta,metalness,
+                        mat.metalColor);
                 } else {
                     break;
                 }
                 
-                kd_local=V3(1.f,1.f,1.f)-ks_local;
-                for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
+                kd_local = V3(1.f,1.f,1.f) - ks_local;
+                for (int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && 
+                    ks_local.E[j] <= 1.f);
 
                 // metals (conductors) have special properties w.r.t. light.
                 // when the EM wave arrives at a conductor interface, the wave goes to zero quite quickly at a characteristic
@@ -671,7 +735,7 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 // (effectively, is completely absorbed and there is no scattering => less diffuse color).
                 kd_local = Lerp(kd_local, V3(0,0,0), metalness);
                 
-                if (bSpecular&&EffectivelySmooth(roughness)) {
+                if (bSpecular && EffectivelySmooth(roughness)) {
                     // if the surface is perfectly smooth, there is no need for microfacet theory and the
                     // brdf is given by the dirac delta in the perfect fresnel ref dir;
                     brdfTerm = ks_local;
@@ -679,42 +743,49 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                     // we don't need an estimator either. We just take the term.
                 } else if (bSpecular) {
                     // NOTE: for specular, the 1/p(x) term is baked into BrdfSpecular.
-                    brdfTerm = Hadamard(ks_local, BrdfSpecular(mat,rayOrigin, N, L, V, halfVector, roughness ) );
+                    brdfTerm = Hadamard(ks_local, BrdfSpecular(mat,rayOrigin, 
+                        N, L, V, halfVector, roughness ) );
                 } else {
                     brdfTerm = NdotL * Hadamard(kd_local, BrdfDiff(mat,rayOrigin));
                 }
 
-                if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
-                              g_debug_render_kind == debug_render_kind_t::variance) {
+                if constexpr (g_debugRenderKind == 
+                    debug_render_kind_t::regular || g_debugRenderKind == 
+                    debug_render_kind_t::variance) 
+                {
                     // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
-                    radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
+                    radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,
+                        rayOrigin,L,depth+1), brdfTerm);
                 }
 
-                if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count ||
-                              g_debug_render_kind == debug_render_kind_t::termination_condition) {
+                if constexpr (g_debugRenderKind == 
+                    debug_render_kind_t::bounce_count || g_debugRenderKind == 
+                    debug_render_kind_t::termination_condition) 
+                {
                     radiance += RayCast(world,rayOrigin,L,depth+1);
                 }
             }
             break;
         } while(true); // END spawning the bounce rays.
         
+    } while(false); // END do while structure.
 
-    } // END IF.
-    } while(false);
+    if constexpr (
+        g_debugRenderKind == debug_render_kind_t::regular ||
+        g_debugRenderKind == debug_render_kind_t::variance
+    ) radiance += mat.emitColor;
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
-                  g_debug_render_kind == debug_render_kind_t::variance)
-        radiance += mat.emitColor;
-
-    if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
+    if constexpr (g_debugRenderKind == debug_render_kind_t::bounce_count) {
         float bounceContrib = 1.f / float(MAX_BOUNCE_COUNT);
         radiance += V3(bounceContrib,bounceContrib,bounceContrib);
     }
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::primary_ray_normals)
+    if constexpr (g_debugRenderKind == debug_render_kind_t::primary_ray_normals)
         radiance = 0.5f * N + V3(0.5,0.5,0.5);
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::termination_condition) {
+    if constexpr (g_debugRenderKind == 
+        debug_render_kind_t::termination_condition
+    ) {
         if (bHitSky)
             radiance = V3(0,0,1);
         else if (bHitLight)
@@ -766,80 +837,92 @@ DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
 
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
 
-    uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * g_image.height) / 
-        (float)(PIXELS_PER_TEXEL * g_tc));
+    uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * 
+        g_image.height) / (float)(PIXELS_PER_TEXEL * g_tc));
+
 #if 0
     PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
 #endif
 
-    {
-        HANDLE threadHandles[MAX_THREAD_COUNT];
-        uint32_t xPos = 0;
-        uint32_t yPos = 0;
-        // TODO: Could do entire image as BSP tree -> assign threads to these regions.
-        // then break up these regions into texels.
-        texel_t *texels = nullptr;
-        std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
-        for (uint32_t i = 0; i < g_tc; i++) {
-            for (uint32_t j = 0; j < maxTexelsPerThread; j++) {
-                texel_t texel;
-                texel.width = THREAD_GROUP_SIZE;
-                texel.height = THREAD_GROUP_SIZE;
-                texel.xPos = xPos;
-                texel.yPos = yPos;
-                xPos += THREAD_GROUP_SIZE;
-                bool isPartialTexel = false;
-                if (texel.yPos + texel.height > g_image.height) {
-                    texel.height -= (texel.yPos + texel.height) - g_image.height;
-                    texel.height = max(texel.height, 0);
+    HANDLE threadHandles[MAX_THREAD_COUNT];
+    uint32_t xPos = 0;
+    uint32_t yPos = 0;
+
+    // TODO: Could do entire image as BSP tree -> assign threads to these regions.
+    // then break up these regions into texels.
+    texel_t *texels = nullptr;
+    std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
+
+    for (uint32_t i = 0; i < g_tc; i++) {
+        for (uint32_t j = 0; j < maxTexelsPerThread; j++) {
+
+            texel_t texel;
+            texel.width = THREAD_GROUP_SIZE;
+            texel.height = THREAD_GROUP_SIZE;
+            texel.xPos = xPos;
+            texel.yPos = yPos;
+            xPos += THREAD_GROUP_SIZE;
+            bool isPartialTexel = false;
+
+            if (texel.yPos + texel.height > g_image.height) {
+                texel.height -= (texel.yPos + texel.height) - g_image.height;
+                texel.height = max(texel.height, 0);
+                isPartialTexel = true;
+            }
+
+            if (xPos >= g_image.width) {
+                if (xPos > g_image.width) {
+                    texel.width -= xPos - g_image.width;
+                    texel.width = max(texel.width, 0);
                     isPartialTexel = true;
                 }
-                if (xPos >= g_image.width) {
-                    if (xPos > g_image.width) {
-                        texel.width -= xPos - g_image.width;
-                        texel.width = max(texel.width, 0);
-                        isPartialTexel = true;
-                    }
-                    xPos = 0;
-                    yPos += THREAD_GROUP_SIZE;
-                }
-                if (texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.width) &&
-                    texel.yPos >= 0 && (texel.yPos + texel.height <= g_image.height)
-                ) {
-                    if (isPartialTexel) j--; // NOTE: This is hack ...
-                    nc_sbpush(texels, texel);
-                } else {
+
+                xPos = 0;
+                yPos += THREAD_GROUP_SIZE;
+            }
+
+            if ( texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.
+                width) && texel.yPos >= 0 && (texel.yPos + texel.height <= 
+                g_image.height) 
+            ) {
+                if (isPartialTexel) j--; // NOTE: This is hack ...
+                nc_sbpush(texels, texel);
+            } else {
 #if 1
-                    printf("found invalid texel:");
-                    printf("with x: %d, ", texel.xPos);
-                    printf("with y: %d\n", texel.yPos);
+                printf("found invalid texel:");
+                printf("with x: %d, ", texel.xPos);
+                printf("with y: %d\n", texel.yPos);
 #endif
-                }
             }
         }
-        // NOTE: The reason we split up the for-loop is because texels base addr
-        // is not stable until we have finished pushing (this is due to stretchy buff logic).
-        for (uint32_t i = 0; i < g_tc; i++) {
-            texelParams[i] = std::make_tuple(
-                texels + i * maxTexelsPerThread,
-                (i + 1 < g_tc) ? maxTexelsPerThread :
-                nc_sbcount(texels) - (g_tc - 1) * maxTexelsPerThread
-            );
-            threadHandles[i] = CreateThread(
-                nullptr,
-                0, // default stack size.
-                RenderThread,
-                (LPVOID)&texelParams[i],
-                0, // thread runs immediately after creation.
-                nullptr
-            );
-        }
-        // wait for all threads to complete.
-        for (uint32_t i = 0; i < g_tc; i++) {
-            WaitForSingleObject(threadHandles[i], INFINITE);
-        }
-        nc_sbfree(texels);
     }
+
+    // NOTE: The reason we split up the for-loop is because texels base addr
+    // is not stable until we have finished pushing (this is due to stretchy buff logic).
+    for (uint32_t i = 0; i < g_tc; i++) {
+
+        texelParams[i] = std::make_tuple(
+            texels + i * maxTexelsPerThread,
+            (i + 1 < g_tc) ? maxTexelsPerThread :
+            nc_sbcount(texels) - (g_tc - 1) * maxTexelsPerThread
+        );
+
+        threadHandles[i] = CreateThread(
+            nullptr,
+            0, // default stack size.
+            RenderThread,
+            (LPVOID)&texelParams[i],
+            0, // thread runs immediately after creation.
+            nullptr
+        );
+    }
+
+    // wait for all threads to complete.
+    for (uint32_t i = 0; i < g_tc; i++) {
+        WaitForSingleObject(threadHandles[i], INFINITE);
+    }
+
+    nc_sbfree(texels);
 
 #undef PIXELS_PER_TEXEL
     
@@ -874,7 +957,7 @@ void RenderTexel( unsigned int *out, texel_t texel )
                 continue;
 #endif
 
-            constexpr bool bVarRender = g_debug_render_kind == 
+            constexpr bool bVarRender = g_debugRenderKind == 
                 debug_render_kind_t::variance;
             
             if ( g_camera.use_pinhole ) {
@@ -885,7 +968,7 @@ void RenderTexel( unsigned int *out, texel_t texel )
                 std::unique_ptr<v3, 
                     /* how does the decltype thing work? well, lambda syntax is shorthand for defining a new functor type.
                     we use decltype to get that functor type back for giving to the template, as required. */
-                    decltype(malloc_deleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
+                    decltype(MallocDeleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
                 v3 *vList = vListManager.get();
 
                 contrib = 1.0f / (float)g_pp / (float)g_pp;
@@ -983,7 +1066,7 @@ void RenderTexel( unsigned int *out, texel_t texel )
                 }
             }
 
-            if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
+            if constexpr (g_debugRenderKind == debug_render_kind_t::regular)
                 color=TonemapPass(color);
 
             v4 BMPColor = {
@@ -1132,7 +1215,7 @@ rtas_node_t GenerateAccelerationStructure(world_t *world)
                     float len=Magnitude(dir);
                     bool exitedEarly;
                     int faceHitIdx;
-                    float t=doesRayIntersectWithAABB2(A, B, minHitDistance, box, &exitedEarly, &faceHitIdx);
+                    float t=RayIntersectWithAABB2(A, B, minHitDistance, box, &exitedEarly, &faceHitIdx);
                     return t!=minHitDistance && t <= len;
                 }
 

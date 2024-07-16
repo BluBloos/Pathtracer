@@ -203,14 +203,14 @@ inline unsigned int BGRAPack4x8(v4 unpacked) {
 
 inline float Magnitude(v3 a) {
     float result=a.x * a.x + a.y * a.y + a.z * a.z;
-    assert(result>=0.f);
+    assert(result >= 0.f);
     result = SquareRoot(result);
     return result;
 }
 
 inline v3 Normalize(v3 a) {
     float magnitude = Magnitude(a);
-    assert(magnitude>0.f);
+    assert(magnitude > 0.f);
     a.x /= magnitude;
     a.y /= magnitude;
     a.z /= magnitude;
@@ -222,7 +222,8 @@ inline v3 Cross(v3 a, v3 b) {
     newvec3.x = a.y * b.z - b.y * a.z;
     newvec3.y = a.z * b.x - b.z * a.x;
     newvec3.z = a.x * b.y - b.x * a.y;
-    return newvec3;                                                                                                                                                                                                                                            }
+    return  newvec3;
+}
 
 inline float Dot(v3 a, v3 b) {
     float result = a.x * b.x + a.y * b.y + a.z* b.z; 
@@ -240,8 +241,10 @@ inline v3 HadamardDiv(v3 a, v3 b) {
 }
 
 // https://en.cppreference.com/w/cpp/numeric/random/uniform_real_distribution
-static std::random_device rd;  // Will be used to obtain a seed for the random number engine
-static std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
+// Will be used to obtain a seed for the random number engine.
+static std::random_device rd;
+// Standard mersenne_twister_engine seeded with rd().
+static std::mt19937 gen(rd()); 
 static std::uniform_real_distribution<float> dis(0.0, 1.0);
 
 inline float RandomUnilateral() {
@@ -392,7 +395,7 @@ float RayIntersectPlanarShape(v3 rayOrigin, v3 rayDirection, float minHit, const
 
  return minHitDistance if there was no hit, otherwise it returns the hit distance.
 */
-float doesRayIntersectWithAABB2(
+float RayIntersectWithAABB2(
     const v3 &rayOrigin, const v3 &rayDir, float minHitDistance,
     const aabb_t &candidateBox, bool *exitedEarly, int*faceHitIdx
 ) {
