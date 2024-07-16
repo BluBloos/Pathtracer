@@ -232,9 +232,7 @@ void main()
     // thing.
     int i = 0;
     IF_winmsg_t msg;
-    // NOTE: passing a NULL window handle polls messages for the entire
-    // thread. this allows the thread WM_QUIT message to be handled.
-    while ( IF_win_poll_message({}, &msg) ) // poll_message will not block.
+    while ( IF_win_poll_message(window, &msg) ) // poll_message will not block.
     {
 
         // handle the message.
@@ -257,6 +255,8 @@ void main()
         }
 
     }
+
+    IF_close_window(window);
 
 }
 

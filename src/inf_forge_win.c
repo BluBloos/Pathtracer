@@ -249,14 +249,13 @@ static LRESULT CALLBACK win32_window_proc(HWND window, UINT message, WPARAM wpar
 {
     switch (message)
     {
-    case WM_CLOSE:
-        DestroyWindow(window);
-        break;
-    case WM_DESTROY:
-        // TODO: why would closing a window by default quit the thread?
-        // this doesn't seem like the behaviour that IF should have.
-        PostQuitMessage(0);
-        break;
+    case WM_CLOSE: {
+        HWND   hWnd = window;
+        UINT   Msg = WM_QUIT;
+        WPARAM wParam = 0;
+        LPARAM lParam = 0;
+        PostMessageA( hWnd, Msg, wParam, lParam );
+    } break;
     default:
         return DefWindowProcA(window, message, wparam, lparam);
     }
