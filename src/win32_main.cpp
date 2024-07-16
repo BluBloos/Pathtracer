@@ -1851,21 +1851,32 @@ plane_t MakeGroundPlane(unsigned int mat){
 }
 
 void PrintHelp() {
-    printf("t<int>                        - Set the number of threads to use.\n");
-    printf("p<int>                        - Set the rays to shoot per pixel.\n");
-    printf("w<int>                        - Set the world number to load. Possible options:\n"
-           "\t1:\tDefault scene.\n"
-           "\t2:\tMetal-roughness test.\n"
-           "\t3:\tCornell box.\n"
-           "\t4:\tRay Tracing in One Weekend book cover.\n"
-           "\t5:\tMario N64 model.\n"
+
+    // print the usage first.
+    printf ( "usage: Pathtracer.exe [options]\n" );
+
+    // print description.
+    printf ( "\nPhysically-based Path Tracer capable of rendering various geometrical shapes, including triangles.\n" );
+
+    printf ( "Written by Noah J. Cabral.\n\n" );
+
+    printf ( "optional arguments:\n" );
+
+    printf("\tt<int>                        - Set the number of threads to use.\n");
+    printf("\tp<int>                        - Set the rays to shoot per pixel.\n");
+    printf("\tw<int>                        - Set the world number to load. Possible options:\n"
+           "\t\t1:\tDefault scene.\n"
+           "\t\t2:\tMetal-roughness test.\n"
+           "\t\t3:\tCornell box.\n"
+           "\t\t4:\tRay Tracing in One Weekend book cover.\n"
+           "\t\t5:\tMario N64 model.\n"
     );
     
-    printf("d                             - Enable depth of field via thin-lens approximation.\n");
-    printf("n                             - Disable loading normal map textures.\n");
-    printf("m                             - Disable loading metalness material textures.\n");
-    printf("r                             - Disable loading roughness material textures.\n");
-    printf("h                             - Print this help menu.\n");
+    printf("\td                             - Enable depth of field via thin-lens approximation.\n");
+    printf("\tn                             - Disable loading normal map textures.\n");
+    printf("\tm                             - Disable loading metalness material textures.\n");
+    printf("\tr                             - Disable loading roughness material textures.\n");
+    printf("\th                             - Print this help menu.\n");
     
 }
 
@@ -1895,7 +1906,7 @@ void ParseArgs() {
                         break;
                     case 'r': g_bRoughness=false;
                         break;
-                    case 'h': PrintHelp();
+                    case 'h': PrintHelp(); exit(0);
                         break;
                     case 'w': g_worldKind=(world_kind_t)max(0,min(WORLD_KIND_COUNT-1,atoi(argv[0])-1));
                         break;
