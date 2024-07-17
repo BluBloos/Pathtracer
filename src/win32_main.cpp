@@ -211,7 +211,7 @@ FUTURE WORK:
 */
 
 
-void main() 
+int main() 
 {
     ParseArgs();
 
@@ -275,6 +275,7 @@ void main()
 
     IF_close_window(window);
 
+    return 0;
 }
 
 // okay, this is really bad from, but depending on the template argument (which Pdf to eval),
@@ -291,6 +292,8 @@ float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f))
         case COSINE_PDF: return max(0.f,Dot(V3(0,0,1), dir)/PI); break;
         default: assert(false);//not supported.
     }
+
+    return 0.f;
 }
 
 template<>
