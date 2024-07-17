@@ -181,7 +181,6 @@ typedef struct camera {
     bool use_pinhole;
     // film plane properties.
     float filmWidth, filmHeight, halfFilmWidth, halfFilmHeight, 
-        // a film pixel is the sizing of a pixel on the film surface.
         halfFilmPixelW, halfFilmPixelH;
-    v3 pos,target,filmCenter,axisZ,axisX,axisY;
+    v3 pos,target,frustrumCenter,axisZ,axisX,axisY;
 } camera_t;

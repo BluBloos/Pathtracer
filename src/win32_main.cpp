@@ -1,14 +1,14 @@
+#include "inf_forge.h" // for the windowing/platform code.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include "ray.hpp"
-#include <automata_engine.h>
 #include <windows.h>
-#include <gist/github/nc_stretchy_buffers.h>
 
 #define CGLTF_IMPLEMENTATION
 #include "external/cgltf.h"
 
-//#define STB_IMAGE_IMPLEMENTATION, already defined in the engine translation unit.
+#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
 #define NC_DS_IMPLEMENTATION
@@ -19,17 +19,70 @@
 #define DEBUG_JUST_COSINE  0
 #define DEBUG_JUST_IMPORTANT_LIGHT 0
 
-enum class debug_render_kind_t {
+typedef enum class debug_render_kind {
     regular,
     primary_ray_normals,
     bounce_count,
     termination_condition,
     variance
-};
-constexpr debug_render_kind_t g_debug_render_kind = debug_render_kind_t::regular;
+} debug_render_kind_t;
 
-auto malloc_deleter = [](auto* ptr) { free(ptr); };
 
+// PROGRAM SETUP.
+void ParseArgs();
+void PrintHelp();
+
+// SCENE SETUP.
+void LoadWorld(world_kind_t kind,camera_t *c);
+void DefineCamera(camera_t *c);
+void LoadGltf();
+void LoadBespokeTextures();
+rtas_node_t GenerateAccelerationStructure(world_t *world);
+
+// PROGRAM FLOW FUNCTIONS.
+DWORD WINAPI RenderThread(_In_ LPVOID lpParameter);
+DWORD WINAPI MasterThread(_In_ LPVOID lpParameter);
+void RenderTexel( unsigned int *pixel_pointer, texel_t texel );
+
+// GEOMETRICAL HELPER FUNCTIONS.
+bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &
+    refractionDir );
+void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
+float RaySphereIntersect(v3 origin, v3 direction, float minHitDistance,     
+    sphere_t sphere, v3 *normal);
+v3 RandomToSphere(sphere_t sphere, v3 from);
+v3 RandomHalfVectorGGX(float roughness);
+v3 RandomCosineDirectionHemisphere();
+v3 RandomDirectionHemisphere();
+static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, 
+    const v3 &rayDirection);
+
+// MISC HELPER FUNCTIONS.
+void WriteDIBImage(image_32_t image, const char *fileName);
+image_32_t AllocateImage(unsigned int width, unsigned int height);
+mipchain_t GenerateMipmapChain(texture_t tex);
+/*
+beware to the unitiated - this function takes "uv",but the value should range 
+from 0->size, not 0->1. 
+*/
+v3 SampleTexture(texture_t tex, v2 uv);
+v3 BespokeSampleTexture(texture_t tex, v2 uv);
+
+// CORE PATH TRACER ALGORITHM.
+v3 BrdfDiff(material_t &mat,v3 surfPt);
+v3 BrdfSpecular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, 
+    float roughness);
+static v3 TonemapPass(v3 pixel);
+v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
+float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
+float GGX(v3 N, v3 H, float roughness);
+float BurleyParameterization(float roughness);
+static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
+bool EffectivelySmooth(float roughness);
+bool IsNotEmissive(const material_t& m);
+
+
+// GLOBALS
 #define MAX_BOUNCE_COUNT 4
 #define MAX_THREAD_COUNT 16
 #define THREAD_GROUP_SIZE 32
@@ -40,41 +93,6 @@ auto malloc_deleter = [](auto* ptr) { free(ptr); };
 #define N_AIR 1.003f
 #define FIXED_FOCAL_LENGTH 0.098f
 #define MIN_ROUGHNESS float(0.01f)
-
-static v3 TonemapPass(v3 pixel);
-static v3 RayCast(world_t *world, v3 o, v3 d, int depth);
-static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection);
-void visualizer(game_memory_t *gameMemory);
-DWORD WINAPI render_thread(_In_ LPVOID lpParameter);
-DWORD WINAPI master_thread(_In_ LPVOID lpParameter);
-rtas_node_t GenerateAccelerationStructure(world_t *world);
-void LoadGltf();
-void LoadBespokeTextures();
-bool FindRefractionDirection( const v3 &rayDir, v3 N, float nglass, v3 &refractionDir );
-v3 brdf_diff(material_t &mat,v3 surfPt);
-v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness);
-v3 SampleTexture(texture_t tex, v2 uv);//beware to the unitiated - this function takes "uv",but the value should range from 0->size, not 0->1.
-v3 BespokeSampleTexture(texture_t tex, v2 uv);
-bool EffectivelySmooth(float roughness);
-void LoadWorld(world_kind_t kind,camera_t *c);
-void ParseArgs();
-void PrintHelp();
-void DefineCamera(camera_t *c);
-void BuildOrthonormalBasisFromW(v3 w, v3 *a, v3 *b, v3 *c);
-mipchain_t GenerateMipmapChain(texture_t tex);
-bool IsNotEmissive(const material_t& m);
-
-v3 SchlickMetal(float F0, float cosTheta, float metalness, v3 surfaceColor);
-float HammonMaskingShadowing(v3 N, v3 L, v3 V, float roughness);
-float GGX(v3 N, v3 H, float roughness);
-float BurleyParameterization(float roughness);
-
-v3 RandomToSphere(sphere_t sphere, v3 from);
-v3 RandomHalfVectorGGX(float roughness);
-v3 RandomCosineDirectionHemisphere();
-v3 RandomDirectionHemisphere();
-
-float RaySphereIntersect(v3 origin, v3 direction, float minHitDistance, sphere_t sphere, v3 *normal);
 
 static world_t g_world = {};
 static camera_t g_camera = {};
@@ -103,6 +121,11 @@ static bool g_use_pinhole;
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/argc-argv-wargv?view=msvc-170&redirectedfrom=MSDN
 extern int __argc;
 extern char ** __argv;
+
+constexpr debug_render_kind_t g_debugRenderKind = 
+    debug_render_kind_t::regular;
+
+auto MallocDeleter = [](auto* ptr) { free(ptr); };
 
 /*
 Hierarchy of work:
@@ -187,33 +210,104 @@ FUTURE WORK:
 - look into ray differentials for generically determine the gradients required to select the mip level. 
 */
 
+
+void main() 
+{
+    ParseArgs();
+
+    const int w = 1280;
+    const int h = 720;
+
+    IF_create_window_info_t info = {};
+    info.width = w;
+    info.height = h;
+    info.title = "Pathtracer";
+    info.flags = IF_CREATE_WINDOW_NORESIZE;
+
+    IF_window_handle_t window = IF_create_window_ex(&info);
+
+    IF_rect_t ca = IF_get_window_clientarea(window);
+
+    g_image = AllocateImage(ca.width, ca.height);
+
+    LoadWorld(g_worldKind, &g_camera);
+
+    // define camera and characteristics
+    DefineCamera(&g_camera);
+
+    // spawn the render thread.
+    g_masterThreadHandle = CreateThread(
+        nullptr,
+        0, // default stack size.
+        MasterThread,
+        nullptr,
+        0, // thread runs immediately after creation.
+        nullptr
+    );
+
+    // handle window messages and visualize the render while it's doing the 
+    // thing.
+    int i = 0;
+    IF_winmsg_t msg;
+    while ( IF_win_poll_message(window, &msg) ) // poll_message will not block.
+    {
+
+        // handle the message.
+        if (msg.isvalid) switch(msg.code) {
+
+        }
+
+        IF_texture_info_t backbufferinfo;
+        backbufferinfo.format = IF_TEXTURE_FORMAT_RGBA8;
+        backbufferinfo.width = g_image.width;
+        backbufferinfo.height = g_image.height;
+
+        IF_blit_to_window_surface( window, g_image.pixelPointer, 
+            &backbufferinfo );
+
+        DWORD result = WaitForSingleObject( g_masterThreadHandle, 0);
+        if (result == WAIT_OBJECT_0) break;
+        else {
+            // the thread handle is not signaled - the thread is still alive
+        }
+
+    }
+
+    IF_close_window(window);
+
+}
+
 // okay, this is really bad from, but depending on the template argument (which Pdf to eval),
-// the func signature is going to change. in CosinePdf we pass dir in tangent space.
+// the func signature is going to change. in COSINE_PDF we pass dir in tangent space.
 // whereas in PdfValue we pass dir in global.
 
-constexpr int CosinePdf=0;
-constexpr int ToSpherePdf=1;
+constexpr int COSINE_PDF=0;
+constexpr int TO_SPHERE_PDF=1;
 
 template<int Pdf>
-float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f)){
-    switch(Pdf){
-        case CosinePdf: return max(0.f,Dot(V3(0,0,1), dir)/PI); break;
+float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f))
+{
+    switch(Pdf) {
+        case COSINE_PDF: return max(0.f,Dot(V3(0,0,1), dir)/PI); break;
         default: assert(false);//not supported.
     }
 }
 
 template<>
-float PdfValue<ToSpherePdf>(v3 dir, sphere_t sphere, v3 from){
-
+float PdfValue<TO_SPHERE_PDF>(v3 dir, sphere_t sphere, v3 from)
+{
     // 0 if direction doesn't intersect with sphere.
     float minHitDistance = MIN_HIT_DISTANCE;
     v3 N;
-    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)<=minHitDistance)
-        return 0.f;
+
+    if (RaySphereIntersect(from, dir, minHitDistance, sphere, &N)
+        <= minHitDistance) return 0.f;
 
     // https://raytracing.github.io/books/RayTracingTheRestOfYourLife.html#samplinglightsdirectly.
-    float cos_theta_max = sqrt(1.f - sphere.r*sphere.r/MagnitudeSquared( from - sphere.p ));
-    float solid_angle = 2.f*PI*(1.f-cos_theta_max);
+    float cosThetaMax = sqrt(1.f - sphere.r*sphere.r/MagnitudeSquared( from - 
+        sphere.p ));
+    float solid_angle = 2.f*PI*(1.f-cosThetaMax);
+
     return  1.f / solid_angle;
 }
 
@@ -221,37 +315,46 @@ static unsigned int GetTotalPixelSize(image_32_t image) {
     return image.height * image.width * sizeof(unsigned int);
 }
 
-static image_32_t AllocateImage(unsigned int width, unsigned int height) {
+static image_32_t AllocateImage(unsigned int width, unsigned int height)
+{
     image_32_t newImage = {};
+
     newImage.width = width;
     newImage.height = height;
     unsigned int totalPixelSize = GetTotalPixelSize(newImage);
     newImage.pixelPointer = (unsigned int *)malloc(totalPixelSize);
+
     return newImage;
 }
 
-static void WriteImage(image_32_t image, const char *fileName, bool bFlip=false) {
+void WriteDIBImage(image_32_t image, const char *fileName) 
+{
     void *pixels;
     unsigned int outputPixelSize = GetTotalPixelSize(image);
     pixels = malloc(outputPixelSize);
-    if (pixels==NULL) { fprintf(stderr, "[ERROR] Unable to write output file,malloc error.\n");return; }
+
+    if (pixels==NULL) { 
+        fprintf(stderr, "[ERROR] Unable to write output file,malloc error.\n");return; 
+    }
+
     bitmap_header_t header = {};
     header.FileType = 0x4D42;   
     header.FileSize = sizeof(bitmap_header_t) + outputPixelSize;
     header.BitmapOffset = sizeof(header); 
     header.size = 40;    
     header.Width = image.width;  
+    // NOTE: with a positive value for Height, the image is a Bottom-up DIB,
+    // where the pixel data starts with the bottom row and progresses to the
+    // top.
     header.Height = image.height;
     header.Planes = 1;          
     header.BitsPerPixel = 32;    
+
     FILE *fileHandle = fopen(fileName, "wb");
+
     if(fileHandle) {
         fwrite(&header, sizeof(header), 1, fileHandle);
-        if (bFlip) {
-            for ( unsigned int *pi=image.pixelPointer+image.width*image.height-1, *pp=(unsigned int*)pixels;pi>=image.pixelPointer; )
-                *pp++=*pi--;
-            fwrite(pixels, outputPixelSize, 1, fileHandle);
-        } else fwrite(image.pixelPointer, outputPixelSize, 1, fileHandle);
+        fwrite(image.pixelPointer, outputPixelSize, 1, fileHandle);
         fclose(fileHandle);
     }
     else {
@@ -260,19 +363,25 @@ static void WriteImage(image_32_t image, const char *fileName, bool bFlip=false)
 }
 
 // helper function to make it a single line.
-bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, aabb_t box)
+bool RayIntersectsWithAABB(v3 rayOrigin, v3 rayDirection, float minHitDistance, 
+    aabb_t box)
 {
     bool exitedEarly;
     int faceHitIdx;
-    float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
-    return t!=minHitDistance;
+
+    float t = RayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, 
+        box, &exitedEarly, &faceHitIdx);
+
+    return t != minHitDistance;
 }
 
-static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const v3 &rayDirection) {
+static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, 
+    const v3 &rayDirection)
+{
     float tolerance = TOLERANCE, minHitDistance = MIN_HIT_DISTANCE;
-    ray_payload_t p={};
-    p.hitDistance=FLT_MAX;
-    p.hitMatIndex=0;
+    ray_payload_t p = {};
+    p.hitDistance = FLT_MAX;
+    p.hitMatIndex = 0;
     float &hitDistance = p.hitDistance;
     unsigned int &hitMatIndex = p.hitMatIndex;
     v3 &nextNormal = p.normal;
@@ -286,8 +395,10 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         sphere_t sphere = world->spheres[sphereIndex];
         float t;
         v3 N;
-        if ((t=RaySphereIntersect(rayOrigin, rayDirection, minHitDistance, sphere, &N))>minHitDistance &&
-            t < hitDistance) {
+
+        if ((t = RaySphereIntersect(rayOrigin, rayDirection, minHitDistance, 
+            sphere, &N)) > minHitDistance && t < hitDistance) 
+        {
             hitDistance = t;
             hitMatIndex = sphere.matIndex;
             nextNormal=N;
@@ -301,12 +412,14 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         quadIndex++
     ) {
         quad_t quad = world->quads[quadIndex];
-        v3 N=Normalize(Cross(quad.u,quad.v));
+        v3 N = Normalize(Cross(quad.u,quad.v));
         
         // TODO: this is a hack to account for our cornell box scene.
         float minHitDistance = 0.02;
 
-        float t=RayIntersectPlanarShape<PLANAR_QUAD>(rayOrigin, rayDirection, minHitDistance, quad.point, quad.u, quad.v);
+        float t = RayIntersectPlanarShape<PLANAR_QUAD>(rayOrigin, rayDirection, 
+            minHitDistance, quad.point, quad.u, quad.v);
+
         if ((t > minHitDistance) && (t < hitDistance)) {
             hitDistance = t;
             hitMatIndex = quad.matIndex;
@@ -321,7 +434,9 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         planeIndex++
     ) {
         plane_t plane = world->planes[planeIndex];
-        float t=RayIntersectPlane(rayOrigin, rayDirection, plane.n, plane.d, minHitDistance);
+        float t = RayIntersectPlane(rayOrigin, rayDirection, plane.n, plane.d, 
+            minHitDistance);
+
         if ((t > minHitDistance) && (t < hitDistance)) {
             hitDistance = t;
             hitMatIndex = plane.matIndex;
@@ -332,10 +447,10 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
     // intersection test with the triangles in the world (via an acceleration structure).
     {
         rtas_node_t &rtas = world->rtas;
-
-        static thread_local  stack_t<rtas_node_t*> nodes={};
-        if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, rtas.bounds))
-            nc_spush(nodes, &rtas);
+        static thread_local  stack_t<rtas_node_t*> nodes = {};
+ 
+        if (rtas.triangleCount && RayIntersectsWithAABB(rayOrigin, 
+            rayDirection, minHitDistance, rtas.bounds)) nc_spush(nodes, &rtas);
 
         mesh_t &mesh = world->meshes[0];
 
@@ -343,30 +458,38 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
         {
             rtas_node_t *r = nc_spop(nodes);
             if (r->children)
-                for (int i=0;i<nc_sbcount(r->children);i++)
+                for (int i = 0; i < nc_sbcount(r->children); i++)
                 {
                     rtas_node_t *c = &r->children[i];
-                    if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, rayDirection, minHitDistance, c->bounds))
-                        nc_spush(nodes, c);
+
+                    if (c->triangleCount && RayIntersectsWithAABB(rayOrigin, 
+                        rayDirection, minHitDistance, c->bounds))
+                    nc_spush(nodes, c);
                 }
             else // leaf
                 for (int i=0;i<r->triangleCount;i++)
                 {
                     int triIndex = r->triangles[i];
                     v3 *points = &mesh.points[triIndex*3];
+
                     v3 A,B,C,u,v;
-                    A=points[0];
-                    B=points[1];
-                    C=points[2];
+                    A = points[0];
+                    B = points[1];
+                    C = points[2];
+
                     v3 n = Normalize( Cross( u=B-A, v=C-A ) );
-                    float t=RayIntersectPlanarShape<PLANAR_TRIANGLE>(rayOrigin, rayDirection, minHitDistance, A, u, v);
+
+                    float t = 
+                        RayIntersectPlanarShape<PLANAR_TRIANGLE>(rayOrigin, 
+                            rayDirection, minHitDistance, A, u, v);
+
                     // hit.
                     if ((t > minHitDistance) && (t < hitDistance)) {
                         hitDistance = t;
 #if 0
                         hitMatIndex = r->bounds.matIndex; // debug.
 #else
-                    hitMatIndex = mesh.matIndices[triIndex*3];
+                        hitMatIndex = mesh.matIndices[triIndex*3];
 #endif
                         nextNormal = n;
                     }
@@ -384,13 +507,14 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin, const
 
         bool exitedEarly;
         int faceHitIdx;
-        // NOTE: the faceNormals array was copied directly from within doesRayIntersectWithAABB2.
+        // NOTE: the faceNormals array was copied directly from within RayIntersectWithAABB2.
         // this is some garbage and not clean code. 
         constexpr v3 faceNormals[] = {
             // front, back, left, right, top, bottom.
             {0.f,0.f,-1.f}, {0.f,0.f,1.f}, {-1.f,0.f,0.f}, {1.f,0.f,0.f}, {0.f,1.f,0.f}, {0.f,-1.f,0.f}
         };
-        float t=doesRayIntersectWithAABB2(rayOrigin, rayDirection, minHitDistance, box, &exitedEarly, &faceHitIdx);
+        float t = RayIntersectWithAABB2(rayOrigin, rayDirection, 
+            minHitDistance, box, &exitedEarly, &faceHitIdx);
 
         // check hit.
         if ((t > minHitDistance) && (t < hitDistance)) {
@@ -409,76 +533,82 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
     v3 rayOrigin, rayDirection;
 
     v3 radiance = {};
-    if (depth>=MAX_BOUNCE_COUNT) return radiance;
+    if (depth >= MAX_BOUNCE_COUNT) return radiance;
 
-    rayOrigin=o;
-    rayDirection=d;
+    rayOrigin = o;
+    rayDirection = d;
 
     ray_payload_t p;
     float &hitDistance = p.hitDistance;
     unsigned int &hitMatIndex = p.hitMatIndex;
     v3 &nextNormal = p.normal;
-    p=RayCastIntersect(world, rayOrigin, rayDirection);
+
+    p = RayCastIntersect(world, rayOrigin, rayDirection);
       
     material_t mat = world->materials[hitMatIndex];
     v3 N=nextNormal;
 
-    bool bHitSky=hitMatIndex==0;
-    bool bHitLight=!IsNotEmissive(mat);
+    bool bHitSky = (hitMatIndex==0);
+    bool bHitLight = !IsNotEmissive(mat);
     bool bIsTerminalRay = (depth == MAX_BOUNCE_COUNT - 1);
 
-    float NdotL,NdotV;
+    float NdotL, NdotV;
 
     do {
-    // NOTE: We terminate at emissive materials since the photons originate from these and we are actually tracing
-    // backwards.
-    if (!bHitSky && !bHitLight) {
+
+        // NOTE: We terminate at emissive materials since the photons originate 
+        // from these and we are actually tracing
+        // backwards.
+        if (bHitSky || bHitLight) break;
 
         float cosTheta,F0,metalness,roughness;
-        v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,tangentY,tangentZ;
+        v3 halfVector,L,V,pureBounce,brdfTerm,ks_local,kd_local,r3,tangentX,
+            tangentY,tangentZ;
 
-        cosTheta=(Dot(nextNormal, rayDirection));
-        cosTheta=(cosTheta>0.f)?Dot(-1.f*nextNormal, rayDirection):cosTheta;
+        cosTheta = (Dot(nextNormal, rayDirection));
+        cosTheta = (cosTheta>0.f) ? Dot(-1.f*nextNormal, rayDirection) : 
+            cosTheta;
 
-        F0 = Square((N_AIR-mat.ior)/(N_AIR+mat.ior)); // NOTE: need to change when support refraction again.
+        F0 = Square((N_AIR-mat.ior)/(N_AIR+mat.ior)); // NOTE: need to change 
+        // when support refraction again.
 
         int tapCount = g_sc;
         //float tapContrib = 1.f / float(tapCount + nc_sbcount(world->lights));
-        float tapContrib=1.f/tapCount;
+        float tapContrib = 1.f/tapCount;
 
         rayOrigin = rayOrigin + hitDistance * rayDirection;
         pureBounce = rayDirection - 2.0f * cosTheta * nextNormal;
 
-        V=-rayDirection;
+        V = -rayDirection;
 
         // Via the material mapping (might be UVs or some other function), sample the texture.
         v2 uv = {rayOrigin.x,rayOrigin.y};//for now.
 
         { // find the metalness.
             if (mat.metalnessIdx==0 || !g_bMetalness) {
-                metalness=mat.metalness;
+                metalness = mat.metalness;
             } else {
-                mipchain_t chain=g_textures[mat.metalnessIdx-1];
-                texture_t tex=chain.mips[0];
+                mipchain_t chain = g_textures[mat.metalnessIdx-1];
+                texture_t tex = chain.mips[0];
                 r3 = BespokeSampleTexture( tex, uv );
-                metalness=r3.x;
+                metalness = r3.x;
             }
         }
 
         if (mat.roughnessIdx==0 || !g_bRoughness) {
-            roughness=mat.roughness;
+            roughness = mat.roughness;
         } else {
-            mipchain_t chain=g_textures[mat.roughnessIdx-1];
-            texture_t tex=chain.mips[0];
+            mipchain_t chain = g_textures[mat.roughnessIdx-1];
+            texture_t tex = chain.mips[0];
             v3 r3 = BespokeSampleTexture(tex, uv );
-            roughness=r3.x;
+            roughness = r3.x;
         }
 
 #if 1
         // find the normal.
         if (g_bNormals && mat.normalIdx!=0){
-            mipchain_t chain=g_textures[mat.normalIdx-1];
-            texture_t tex=chain.mips[0];
+            mipchain_t chain = g_textures[mat.normalIdx-1];
+            texture_t tex = chain.mips[0];
             N = BespokeSampleTexture(tex, uv );
             // NOTE: this currently only works for the ground plane, since it's normal happens to be up!
             N = Normalize(2.f*N - V3(1.f,1.f,1.f));
@@ -486,19 +616,23 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
 #endif
 
         // if we do not support refraction, this should never occur.
-        NdotV=Dot(N, V);
+        NdotV = Dot(N, V);
         if ((NdotV)<=0.f) break;
 
         // Define the local tangent space using the normal.
         BuildOrthonormalBasisFromW( N, &tangentX, &tangentY, &tangentZ );
 
         // use monte carlo estimator.
-        const bool bJustCosine=DEBUG_JUST_COSINE || (g_worldKind==WORLD_RAYTRACING_ONE_WEEKEND);
+        const bool bJustCosine=DEBUG_JUST_COSINE || 
+            (g_worldKind==WORLD_RAYTRACING_ONE_WEEKEND);
         constexpr bool bJustImportance=DEBUG_JUST_IMPORTANT_LIGHT;
-        assert( !(bJustImportance && bJustCosine) && "they can't both be true." );
+        assert( !(bJustImportance && bJustCosine) &&
+             "they can't both be true." );
+
         do {
-            bool bSpecular=RandomUnilateral()>0.5f;
+            bool bSpecular = RandomUnilateral()>0.5f;
             float px;
+
             // the code below is somewhat nuanced. we use a correction weight. what is the "correction weight"?
             // well, the total brdf term is specular+diffuse. so, we can split that integral into two,
             // because integrals are linear. thus, what was a single statistical estimator before is
@@ -508,69 +642,87 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
             // business that we're doing here.
 
             if (bSpecular && EffectivelySmooth(roughness)) {
-                L=pureBounce;
-                px=1.f;
-            } else if (!bSpecular) {
+                L = pureBounce;
+                px = 1.f;
+            }
+            else if (!bSpecular) {
 
                 bool bSampleCosine = RandomUnilateral()>0.5f;
+
                 //hittable_t importantLight; // Three cases. 1: sample sphere. 2. sample square light. 3. sample nothing,because there is no light.
                 //assert(incomingLight)
-                sphere_t importantLight=world->spheres[0];//for now, this only works for some scenes.
+
+                sphere_t importantLight = world->spheres[0];//for now, this 
+                //only works for some scenes.
+
                 v3 rDir,lobeBounce;
+
                 if ( !bJustImportance && (bSampleCosine || bJustCosine) )
                 {
                     rDir=RandomCosineDirectionHemisphere();   
-                } else if ( !bJustCosine && (!bSampleCosine || bJustImportance) ) {
+                } 
+                else if ( !bJustCosine && (!bSampleCosine || bJustImportance) ) 
+                {
                     v3 direction = importantLight.p - rayOrigin;
-                    rDir=RandomToSphere(importantLight, rayOrigin);
-                    BuildOrthonormalBasisFromW( direction, &tangentX, &tangentY, &tangentZ );
+                    rDir = RandomToSphere(importantLight, rayOrigin);
+                    BuildOrthonormalBasisFromW( direction, &tangentX, &
+                        tangentY, &tangentZ );
                 }
 
                 if (rDir==V3(0,0,0)) continue; // e.g., rayOrigin is for some reason inside the sphere.
                 
-                lobeBounce = Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*tangentZ);
-                L = lobeBounce;    
-                halfVector =(1.f/Magnitude(L+V)) * (L+V);
+                lobeBounce = Normalize(rDir.x * tangentX + rDir.y * 
+                    tangentY + rDir.z * tangentZ);
+                L = lobeBounce;
+                halfVector = (1.f/Magnitude(L+V)) * (L+V);
 
                 if ( !bJustCosine && !bJustImportance ) {
                     // Now that we are using a pdf mixture, it's important to retain the cosTheta term from rendering equation.
-                    px = (
-                        0.5f * PdfValue<CosinePdf>(Normalize(rDir)) + 
-                        0.5f *
-                        PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin));
+                    px = 0.5f * PdfValue<COSINE_PDF>(Normalize(rDir)) + 
+                        0.5f * PdfValue<TO_SPHERE_PDF>(lobeBounce,
+                            importantLight, rayOrigin);
                 }
+
                 if ( bJustCosine ) {
-                    px = PdfValue<CosinePdf>(Normalize(rDir));
+                    px = PdfValue<COSINE_PDF>(Normalize(rDir));
                 }
+
                 if ( bJustImportance ) {
-                    px = PdfValue<ToSpherePdf>(lobeBounce,importantLight,rayOrigin);
+                    px = PdfValue<TO_SPHERE_PDF>(lobeBounce,importantLight,rayOrigin);
                 }
 
                 if (px==0.f) continue;
 
             } else {
                 // reflection equation from: https://schuttejoe.github.io/post/ggximportancesamplingpart1/
-                v3 rDir= RandomHalfVectorGGX(roughness);
-                halfVector=Normalize(rDir.x*tangentX+rDir.y*tangentY+rDir.z*N);
+                v3 rDir = RandomHalfVectorGGX(roughness);
+                halfVector = Normalize( rDir.x * tangentX + rDir.y * 
+                    tangentY + rDir.z * N);
                 L = 2.f * (Dot(V, halfVector)) * halfVector - V;
-                px=1.f;
+                px = 1.f;
             }
 
-            if ((NdotL=Dot(N, L))>0.f)//incoming light is in hemisphere.
+            if ( (NdotL=Dot(N, L))>0.f )  //incoming light is in hemisphere.
             {
                 // NOTE: the difference here is maybe a little bit subtle. when the surface is perfectly smooth, we
                 // don't require microfacet theory. thus, we won't be using the half vector.
-                if (EffectivelySmooth(roughness)){
+
+                if (EffectivelySmooth(roughness)) {
                     ks_local = SchlickMetal(F0,NdotL,metalness,mat.metalColor);
                     //ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
-                } else if (((Dot(halfVector,V)>0.f)&&(cosTheta=Dot(halfVector,L))>0.f)){
-                    ks_local = SchlickMetal(F0,cosTheta,metalness,mat.metalColor);
+                } 
+                else if ( ((Dot(halfVector,V) > 0.f) && 
+                    (cosTheta = Dot(halfVector,L)) >0.f) )
+                {
+                    ks_local = SchlickMetal(F0,cosTheta,metalness,
+                        mat.metalColor);
                 } else {
                     break;
                 }
                 
-                kd_local=V3(1.f,1.f,1.f)-ks_local;
-                for(int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && ks_local.E[j] <= 1.f);
+                kd_local = V3(1.f,1.f,1.f) - ks_local;
+                for (int j=0;j<3;j++) assert(ks_local.E[j] >= 0.f && 
+                    ks_local.E[j] <= 1.f);
 
                 // metals (conductors) have special properties w.r.t. light.
                 // when the EM wave arrives at a conductor interface, the wave goes to zero quite quickly at a characteristic
@@ -578,50 +730,57 @@ static v3 RayCast(world_t *world, v3 o, v3 d, int depth)
                 // (effectively, is completely absorbed and there is no scattering => less diffuse color).
                 kd_local = Lerp(kd_local, V3(0,0,0), metalness);
                 
-                if (bSpecular&&EffectivelySmooth(roughness)) {
+                if (bSpecular && EffectivelySmooth(roughness)) {
                     // if the surface is perfectly smooth, there is no need for microfacet theory and the
                     // brdf is given by the dirac delta in the perfect fresnel ref dir;
                     brdfTerm = ks_local;
                     //and therefore,
                     // we don't need an estimator either. We just take the term.
                 } else if (bSpecular) {
-                    // NOTE: for specular, the 1/p(x) term is baked into brdf_specular.
-                    brdfTerm = Hadamard(ks_local, brdf_specular(mat,rayOrigin, N, L, V, halfVector, roughness ) );
+                    // NOTE: for specular, the 1/p(x) term is baked into BrdfSpecular.
+                    brdfTerm = Hadamard(ks_local, BrdfSpecular(mat,rayOrigin, 
+                        N, L, V, halfVector, roughness ) );
                 } else {
-                    brdfTerm = NdotL * Hadamard(kd_local, brdf_diff(mat,rayOrigin));
+                    brdfTerm = NdotL * Hadamard(kd_local, BrdfDiff(mat,rayOrigin));
                 }
 
-                if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
-                              g_debug_render_kind == debug_render_kind_t::variance) {
+                if constexpr (g_debugRenderKind == 
+                    debug_render_kind_t::regular || g_debugRenderKind == 
+                    debug_render_kind_t::variance) 
+                {
                     // NOTE: since we sample by cos(theta), the NdotL term goes away by the 1/p(x) term.
-                    radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,rayOrigin,L,depth+1), brdfTerm);
+                    radiance += 2.f * (1.f/px) * Hadamard(RayCast(world,
+                        rayOrigin,L,depth+1), brdfTerm);
                 }
 
-                if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count ||
-                              g_debug_render_kind == debug_render_kind_t::termination_condition) {
+                if constexpr (g_debugRenderKind == 
+                    debug_render_kind_t::bounce_count || g_debugRenderKind == 
+                    debug_render_kind_t::termination_condition) 
+                {
                     radiance += RayCast(world,rayOrigin,L,depth+1);
                 }
             }
             break;
         } while(true); // END spawning the bounce rays.
         
+    } while(false); // END do while structure.
 
-    } // END IF.
-    } while(false);
+    if constexpr (
+        g_debugRenderKind == debug_render_kind_t::regular ||
+        g_debugRenderKind == debug_render_kind_t::variance
+    ) radiance += mat.emitColor;
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::regular ||
-                  g_debug_render_kind == debug_render_kind_t::variance)
-        radiance += mat.emitColor;
-
-    if constexpr (g_debug_render_kind == debug_render_kind_t::bounce_count) {
+    if constexpr (g_debugRenderKind == debug_render_kind_t::bounce_count) {
         float bounceContrib = 1.f / float(MAX_BOUNCE_COUNT);
         radiance += V3(bounceContrib,bounceContrib,bounceContrib);
     }
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::primary_ray_normals)
+    if constexpr (g_debugRenderKind == debug_render_kind_t::primary_ray_normals)
         radiance = 0.5f * N + V3(0.5,0.5,0.5);
 
-    if constexpr (g_debug_render_kind == debug_render_kind_t::termination_condition) {
+    if constexpr (g_debugRenderKind == 
+        debug_render_kind_t::termination_condition
+    ) {
         if (bHitSky)
             radiance = V3(0,0,1);
         else if (bHitLight)
@@ -639,36 +798,6 @@ bool IsNotEmissive(const material_t& m){
     return (m.emitColor==V3(0,0,0));
 }
 
-// TODO: Right now, the image is upside-down. Do we fix this on the application side
-// or is this something that we can fix on the engine side?
-void visualizer(game_memory_t *gameMemory) {
-    memcpy((void *)gameMemory->backbufferPixels, g_image.pixelPointer,
-        sizeof(uint32_t) * gameMemory->backbufferWidth * gameMemory->backbufferHeight);
-
-    DWORD result = WaitForSingleObject( g_masterThreadHandle, 0);
-    if (result == WAIT_OBJECT_0) {
-//        setGlobalRunning
-        automata_engine::setGlobalRunning(false);// platform::GLOBAL_RUNNING=false;
-    }
-    else {
-        // the thread handle is not signaled - the thread is still alive
-    }
-}
-
-void automata_engine::HandleWindowResize(game_memory_t *gameMemory, int nw, int nh) { 
-    // nothing to see here, folks.
-}
-
-void automata_engine::Close(game_memory_t *gameMemory) { 
-    // nothing to see here, folks.
-}
-
-void automata_engine::PreInit(game_memory_t *gameMemory) {
-    ae::defaultWinProfile = AUTOMATA_ENGINE_WINPROFILE_NORESIZE;
-    ae::defaultWindowName = "Raytracer";
-
-    ParseArgs();
-}
 
 // NOTE: 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
@@ -681,269 +810,332 @@ void automata_engine::PreInit(game_memory_t *gameMemory) {
 // In fact, this is exactly what is happening. we pass a pointer, which is going to be the same one
 // every time and the threads are all in the same virtual memory space. So next time thru the loop,
 // the texels arr is updated for all threads.
-DWORD WINAPI render_thread(_In_ LPVOID lpParameter) {
+DWORD WINAPI RenderThread(_In_ LPVOID lpParameter)
+{
     std::tuple<texel_t *, uint32_t> *ptr_to_tuple = 
         (std::tuple<texel_t *, uint32_t> *)lpParameter;
     texel_t *texels = std::get<0>(*ptr_to_tuple);
-    for (uint32_t i = 0; i < std::get<1>(*ptr_to_tuple); i++) {
+
+    for (uint32_t i = 0; i < std::get<1>(*ptr_to_tuple); i++)
+    {
         texel_t texel = texels[i];
-        unsigned int *out = g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
-        // Raytracer works by averaging all colors from all rays shot from this pixel.
-        for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++) {
-            float filmY = -1.0f + 2.0f * (float)y / (float)g_image.height;
-            for (unsigned int x = texel.xPos; x < (texel.width + texel.xPos); x++) {
-                
-                // filmX and filmY are values in the range [-1,1].
-                float filmX = -1.0f + 2.0f * (float)x / (float)g_image.width;
+        unsigned int *out =
+            g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
 
-                v3 color = {};
-                v3 radiance={};
-
-#if DEBUG_MIDDLE_PIXEL
-                if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) continue;
-#endif
-
-                constexpr bool bVarRender = g_debug_render_kind == debug_render_kind_t::variance;
-                
-                if ( g_camera.use_pinhole ) {
-                    
-                    float contrib;
-                    v3 rayDirection,filmP,rayOrigin = g_camera.pos;
-
-                    std::unique_ptr<v3, 
-                        /* how does the decltype thing work? well, lambda syntax is shorthand for defining a new functor type.
-                        we use decltype to get that functor type back for giving to the template, as required. */
-                        decltype(malloc_deleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
-                    v3 *vList = vListManager.get();
-
-                    contrib = 1.0f / (float)g_pp / (float)g_pp;
-                    for (int i = 0;i < g_pp;i++) {
-                        for (int j = 0;j < g_pp;j++) {
-
-                            float llpixelX = filmX - 1.f * g_camera.halfFilmPixelW;
-                            float llpixelY = filmY - 1.f * g_camera.halfFilmPixelH;
-                            float stepX = 1.f / g_pp * g_camera.halfFilmPixelW*2.f;
-                            float stepY = 1.f / g_pp * g_camera.halfFilmPixelH*2.f;
-                            //float halfStep = step / 2.f;
-                            float xStep = llpixelX + float(i) / g_pp * g_camera.halfFilmPixelW + stepX*0.5f;
-                            float yStep = llpixelY + float(j) / g_pp * g_camera.halfFilmPixelH + stepY*0.5f;
-                           
-                            xStep += (RandomUnilateral() - 0.5f) * stepX;
-                            yStep += (RandomUnilateral() - 0.5f) * stepY;
-
-                            filmP = g_camera.filmCenter + 
-                                ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
-                                ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
-                            rayDirection = Normalize(filmP - g_camera.pos);
-
-                            radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
-                            if (IsNaN(radiance)) {j--;continue;}//try again.
-                            color = color + contrib * radiance;
-                            if constexpr (bVarRender) vList[i * g_pp + j] = radiance;
-                        }
-                    }
-
-                    if constexpr (bVarRender) {
-                        v3 var=V3(0,0,0);
-                        for (int i=0; i < g_pp * g_pp; i++){
-                            var = var + contrib * Hadamard( vList[i]-color, vList[i]-color );
-                        }
-                        color=var;
-                    }
-
-                } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
-                {
-                    assert(bVarRender==false&&"not supported");
-
-                    float contrib = 1.0f / (float)g_pp/(float)g_pp;
-
-                    // the poisson disk samples
-                    const int NUM_SAMPLES = 12;     // the number of samples to take.
-                    //const float PI = 3.14159265359f; // the value of PI.
-                    static const v2 poissonDisk[NUM_SAMPLES] = {
-                        V2(0.0, 0.0),
-                        V2(-0.94201624, -0.39906216),
-                        V2(0.94558609, -0.76890725),
-                        V2(-0.094184101, -0.92938870),
-                        V2(0.34495938, 0.29387760),
-                        V2(-0.91588581, 0.45771432),
-                        V2(-0.81544232, -0.87912464),
-                        V2(-0.38277543, 0.27676845),
-                        V2(0.97484398, 0.75648379),
-                        V2(0.44323325, -0.97511554),
-                        V2(0.53742981, -0.47373420),
-                        V2(-0.26496911, -0.41893023)
-                    };
-
-                    for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) { // integrate across image sensor.
-                        
-                        float offX = filmX + (RandomBilateral() * g_camera.halfFilmPixelW);
-                        float offY = filmY + (RandomBilateral() * g_camera.halfFilmPixelH);
-                        v3 filmP = g_camera.filmCenter + (offX * g_camera.halfFilmWidth * g_camera.axisX) + (offY * g_camera.halfFilmHeight * g_camera.axisY);
-                        v3 rayOrigin = g_camera.pos;
-                        v3 rayDirection = Normalize(g_camera.pos-filmP);
-
-                        // intersect with focal plane.
-                        // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
-                        // 1/f = 1/v + 1/b.
-                        float focalPlaneDist = 1.f/(1.f/FIXED_FOCAL_LENGTH - 1.f/g_camera.focalLength);
-                        v3 planePoint,N= g_camera.axisZ,focalPoint;
-                        planePoint = g_camera.pos + g_camera.axisX + focalPlaneDist*N;
-                        float d = Dot(N,planePoint);
-
-                        float t=RayIntersectPlane(rayOrigin, rayDirection, N, d, MIN_HIT_DISTANCE);
-                        assert(t!=MIN_HIT_DISTANCE);
-
-                        focalPoint=rayOrigin+t*rayDirection;
-
-                        // sample poisson disk point.
-                        for (unsigned int rayIndex2 = 0; rayIndex2 < g_pp; rayIndex2++) {
-
-                            v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
-                            v3 rayOriginDisk,rayDirectionDisk;
-                            rayOriginDisk = rayOrigin + diskSample.x*g_camera.aperatureRadius*g_camera.axisX + diskSample.y*g_camera.aperatureRadius*g_camera.axisY;
-                            rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
-
-                            radiance=RayCast(&g_world, rayOriginDisk, rayDirectionDisk, 0);
-                            if (IsNaN(radiance)) {rayIndex2--;continue;}//try again.
-                            color = color + contrib * radiance;
-                        }
-                    }
-                }
-
-                if constexpr (g_debug_render_kind == debug_render_kind_t::regular)
-                    color=TonemapPass(color);
-
-                v4 BMPColor = {
-                    255.0f * LinearToSRGB(color.r),
-                    255.0f * LinearToSRGB(color.g),
-                    255.0f * LinearToSRGB(color.b), 
-                    255.0f
-                }; 
-                unsigned int BMPValue = BGRAPack4x8(BMPColor);
-                *out++ = BMPValue; // ARGB
-            }
-            out += g_image.width - texel.width;
-        }
-        // TODO: It seems that the thread continues even after we close the window??
-        // (we had prints that were showing) it could be the terminal doing a buffering thing,
-        // and just being slow. OR, it could be that the threads are for reals still alive?? 
-        // If it is the second one, this is a cause for concern.
+        RenderTexel( out, texel );
     }
+
     ExitThread(0);
 }
 
-DWORD WINAPI master_thread(_In_ LPVOID lpParameter) {
+DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
 
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
 
-    uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * g_image.height) / 
-        (float)(PIXELS_PER_TEXEL * g_tc));
+    uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * 
+        g_image.height) / (float)(PIXELS_PER_TEXEL * g_tc));
+
 #if 0
     PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
 #endif
 
-    {
-        HANDLE threadHandles[MAX_THREAD_COUNT];
-        uint32_t xPos = 0;
-        uint32_t yPos = 0;
-        // TODO: Could do entire image as BSP tree -> assign threads to these regions.
-        // then break up these regions into texels.
-        texel_t *texels = nullptr;
-        std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
-        for (uint32_t i = 0; i < g_tc; i++) {
-            for (uint32_t j = 0; j < maxTexelsPerThread; j++) {
-                texel_t texel;
-                texel.width = THREAD_GROUP_SIZE;
-                texel.height = THREAD_GROUP_SIZE;
-                texel.xPos = xPos;
-                texel.yPos = yPos;
-                xPos += THREAD_GROUP_SIZE;
-                bool isPartialTexel = false;
-                if (texel.yPos + texel.height > g_image.height) {
-                    texel.height -= (texel.yPos + texel.height) - g_image.height;
-                    texel.height = max(texel.height, 0);
+    HANDLE threadHandles[MAX_THREAD_COUNT];
+    uint32_t xPos = 0;
+    uint32_t yPos = 0;
+
+    // TODO: Could do entire image as BSP tree -> assign threads to these regions.
+    // then break up these regions into texels.
+    texel_t *texels = nullptr;
+    std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
+
+    for (uint32_t i = 0; i < g_tc; i++) {
+        for (uint32_t j = 0; j < maxTexelsPerThread; j++) {
+
+            texel_t texel;
+            texel.width = THREAD_GROUP_SIZE;
+            texel.height = THREAD_GROUP_SIZE;
+            texel.xPos = xPos;
+            texel.yPos = yPos;
+            xPos += THREAD_GROUP_SIZE;
+            bool isPartialTexel = false;
+
+            if (texel.yPos + texel.height > g_image.height) {
+                texel.height -= (texel.yPos + texel.height) - g_image.height;
+                texel.height = max(texel.height, 0);
+                isPartialTexel = true;
+            }
+
+            if (xPos >= g_image.width) {
+                if (xPos > g_image.width) {
+                    texel.width -= xPos - g_image.width;
+                    texel.width = max(texel.width, 0);
                     isPartialTexel = true;
                 }
-                if (xPos >= g_image.width) {
-                    if (xPos > g_image.width) {
-                        texel.width -= xPos - g_image.width;
-                        texel.width = max(texel.width, 0);
-                        isPartialTexel = true;
-                    }
-                    xPos = 0;
-                    yPos += THREAD_GROUP_SIZE;
-                }
-                if (texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.width) &&
-                    texel.yPos >= 0 && (texel.yPos + texel.height <= g_image.height)
-                ) {
-                    if (isPartialTexel) j--; // NOTE: This is hack ...
-                    StretchyBufferPush(texels, texel);
-                } else {
-#if 0
-                    PlatformLoggerWarn("found invalid texel:");
-                    PlatformLoggerLog("with x: %d", texel.xPos);
-                    PlatformLoggerLog("with y: %d", texel.yPos);
+
+                xPos = 0;
+                yPos += THREAD_GROUP_SIZE;
+            }
+
+            if ( texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.
+                width) && texel.yPos >= 0 && (texel.yPos + texel.height <= 
+                g_image.height) 
+            ) {
+                if (isPartialTexel) j--; // NOTE: This is hack ...
+                nc_sbpush(texels, texel);
+            } else {
+#if 1
+                printf("found invalid texel:");
+                printf("with x: %d, ", texel.xPos);
+                printf("with y: %d\n", texel.yPos);
 #endif
-                }
             }
         }
-        // NOTE: The reason we split up the for-loop is because texels base addr
-        // is not stable until we have finished pushing (this is due to stretchy buff logic).
-        for (uint32_t i = 0; i < g_tc; i++) {
-            texelParams[i] = std::make_tuple(
-                texels + i * maxTexelsPerThread,
-                (i + 1 < g_tc) ? maxTexelsPerThread :
-                StretchyBufferCount(texels) - (g_tc - 1) * maxTexelsPerThread
-            );
-            threadHandles[i] = CreateThread(
-                nullptr,
-                0, // default stack size.
-                render_thread,
-                (LPVOID)&texelParams[i],
-                0, // thread runs immediately after creation.
-                nullptr
-            );
-        }
-        // wait for all threads to complete.
-        for (uint32_t i = 0; i < g_tc; i++) {
-            WaitForSingleObject(threadHandles[i], INFINITE);
-        }
-        StretchyBufferFree(texels);
     }
+
+    // NOTE: The reason we split up the for-loop is because texels base addr
+    // is not stable until we have finished pushing (this is due to stretchy buff logic).
+    for (uint32_t i = 0; i < g_tc; i++) {
+
+        texelParams[i] = std::make_tuple(
+            texels + i * maxTexelsPerThread,
+            (i + 1 < g_tc) ? maxTexelsPerThread :
+            nc_sbcount(texels) - (g_tc - 1) * maxTexelsPerThread
+        );
+
+        threadHandles[i] = CreateThread(
+            nullptr,
+            0, // default stack size.
+            RenderThread,
+            (LPVOID)&texelParams[i],
+            0, // thread runs immediately after creation.
+            nullptr
+        );
+    }
+
+    // wait for all threads to complete.
+    for (uint32_t i = 0; i < g_tc; i++) {
+        WaitForSingleObject(threadHandles[i], INFINITE);
+    }
+
+    nc_sbfree(texels);
 
 #undef PIXELS_PER_TEXEL
     
-    bool bFlip=true;
-    WriteImage(g_image, "test.bmp",bFlip);
+    WriteDIBImage(g_image, "test.bmp");
     printf("Done. Image written to test.bmp\n");
     ExitThread(0);
 }
 
-void automata_engine::Init(game_memory_t *gameMemory) {
-    printf("Doing stuff...\n");
-    game_window_info_t winInfo = automata_engine::platform::getWindowInfo();
-    g_image = AllocateImage(winInfo.width, winInfo.height);    
-    
-    LoadWorld(g_worldKind,&g_camera);
-    // define camera and characteristics
-    DefineCamera(&g_camera);
+// render a texl on the film plane.
+void RenderTexel( unsigned int *out, texel_t texel )
+{
+    // Raytracer works by averaging all colors from all rays shot from this 
+    // pixel.
 
-    automata_engine::bifrost::registerApp("raytracer_vis", visualizer);
-    g_masterThreadHandle=CreateThread(
-        nullptr,
-        0, // default stack size.
-        master_thread,
-        nullptr,
-        0, // thread runs immediately after creation.
-        nullptr
-    );
+    for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++)
+    {
+        for ( unsigned int x = texel.xPos; x < (texel.width + texel.xPos); x++) 
+        {
+            
+            // frustrum vals are values in the range [-1,1].
+            // the frustrum plane is that from the camera and in the direction
+            // of the scene.
+            const float frustrumY = -1.0f + 2.0f * (float)y / (float)g_image.
+                height;
+            const float frustrumX = -1.0f + 2.0f * (float)x / (float)g_image.
+                width;
+
+            v3 color = {};
+            v3 radiance = {};
+
+#if DEBUG_MIDDLE_PIXEL
+            if ((y != (g_image.height/2)) || (x!= (g_image.width/2))) 
+                continue;
+#endif
+
+            constexpr bool bVarRender = g_debugRenderKind == 
+                debug_render_kind_t::variance;
+            
+            /* 
+            how does the decltype thing work? well, lambda syntax is 
+            shorthand for defining a new functor type.
+            we use decltype to get that functor type back for giving to 
+            the template, as required. 
+            */
+
+            std::unique_ptr<v3, decltype(MallocDeleter)> 
+                vListManager { bVarRender ? (v3*)malloc( g_pp *g_pp * 
+                    sizeof(v3)) : nullptr };
+            v3 *vList = vListManager.get();
+
+            // pinhole does not have depth of field.
+            if ( g_camera.use_pinhole ) {
+
+                v3 pinhole = g_camera.pos; 
+                
+                float contrib;
+                v3 rayDirection, frustrumP;
+
+                // cast a number of rays per pixel in a statified manner.
+                contrib = 1.0f / (float)g_pp / (float)g_pp;
+                for (int i = 0;i < g_pp;i++) {
+                    for (int j = 0;j < g_pp;j++) {
+
+                        float llpixelX = frustrumX - 1.f * g_camera.
+                            halfFilmPixelW;
+                        float llpixelY = frustrumY - 1.f * g_camera.
+                            halfFilmPixelH;
+                        float stepX = 1.f / g_pp * g_camera.halfFilmPixelW*2.f;
+                        float stepY = 1.f / g_pp * g_camera.halfFilmPixelH*2.f;
+
+                        float xStep = llpixelX + float(i) / g_pp * g_camera.
+                            halfFilmPixelW + stepX*0.5f;
+                        float yStep = llpixelY + float(j) / g_pp * g_camera.
+                            halfFilmPixelH + stepY*0.5f;
+                        
+                        xStep += (RandomUnilateral() - 0.5f) * stepX;
+                        yStep += (RandomUnilateral() - 0.5f) * stepY;
+
+                        frustrumP = g_camera.frustrumCenter + 
+                            ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
+                            ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
+
+                        // towards the film means towards the scene.
+                        rayDirection = Normalize(frustrumP - pinhole);
+
+                        radiance = RayCast(&g_world, pinhole, rayDirection,0);
+
+                        if (IsNaN(radiance)) {j--; continue;} // try again.
+                        color = color + contrib * radiance;
+
+                        if constexpr (bVarRender) vList[i * g_pp + j] = 
+                            radiance;
+                    }
+                }
+
+                if constexpr (bVarRender) {
+                    v3 var=V3(0,0,0);
+                    for (int i=0; i < g_pp * g_pp; i++){
+                        var = var + contrib * Hadamard( vList[i]-color, vList[i]-color );
+                    }
+                    color=var;
+                }
+
+            } 
+            // if not the pinhole model, we use a more physical camera model 
+            // with a real aperature and lens.
+            else 
+            {
+                assert(bVarRender == false && "not supported");
+
+                float contrib = 1.0f / (float)g_pp/(float)g_pp;
+
+                // the poisson disk samples
+                // the number of samples to take.
+                const int NUM_SAMPLES = 12;     
+
+                static const v2 poissonDisk[NUM_SAMPLES] = {
+                    V2(0.0, 0.0),
+                    V2(-0.94201624, -0.39906216),
+                    V2(0.94558609, -0.76890725),
+                    V2(-0.094184101, -0.92938870),
+                    V2(0.34495938, 0.29387760),
+                    V2(-0.91588581, 0.45771432),
+                    V2(-0.81544232, -0.87912464),
+                    V2(-0.38277543, 0.27676845),
+                    V2(0.97484398, 0.75648379),
+                    V2(0.44323325, -0.97511554),
+                    V2(0.53742981, -0.47373420),
+                    V2(-0.26496911, -0.41893023)
+                };
+
+                v3 lensCenter = g_camera.pos;
+
+                for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) { // integrate across image sensor.
+                    
+                    float offX = frustrumX + (RandomBilateral() * g_camera.
+                        halfFilmPixelW);
+                    float offY = frustrumY + (RandomBilateral() * g_camera.
+                        halfFilmPixelH);
+
+                    v3 frustrumP = g_camera.frustrumCenter + 
+                        (offX * g_camera.halfFilmWidth * g_camera.axisX) + 
+                        (offY * g_camera.halfFilmHeight * g_camera.axisY);
+
+                    v3 rayDirection = Normalize(frustrumP - lensCenter);
+
+                    // intersect with focal plane.
+                    // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
+                    // 1/f = 1/v + 1/b.
+                    float focalPlaneDist = 1.f/(
+                        1.f/FIXED_FOCAL_LENGTH - 1.f/g_camera.focalLength);
+                    v3 planePoint, N = -g_camera.axisZ, focalPoint;
+                    planePoint = 
+                        lensCenter + g_camera.axisX + focalPlaneDist * N;
+                    float d = Dot(N, planePoint);
+
+                    float t = RayIntersectPlane( lensCenter, rayDirection, 
+                        N, d, MIN_HIT_DISTANCE);
+
+                    assert(t > MIN_HIT_DISTANCE);
+
+                    focalPoint = lensCenter + t * rayDirection;
+
+                    // sample poisson disk point.
+                    for (
+                        unsigned int rayIndex2 = 0;
+                        rayIndex2 < g_pp; rayIndex2++) 
+                    {
+
+                        v2 diskSample = poissonDisk[
+                            (rayIndex2 * rayIndex) % NUM_SAMPLES];
+
+                        v3 rayOriginDisk, rayDirectionDisk;
+
+                        rayOriginDisk = lensCenter + diskSample.x * 
+                            g_camera.aperatureRadius * g_camera.axisX + 
+                            diskSample.y * g_camera.aperatureRadius * 
+                            g_camera.axisY;
+
+                        rayDirectionDisk = Normalize(focalPoint -   
+                            rayOriginDisk);
+
+                        radiance = RayCast(&g_world, rayOriginDisk,
+                            rayDirectionDisk, 0);
+
+                        if (IsNaN(radiance)) {rayIndex2--;continue;}//try again.
+                        color = color + contrib * radiance;
+                    }
+                }
+            }
+
+            if constexpr (g_debugRenderKind == debug_render_kind_t::regular)
+                color=TonemapPass(color);
+
+            v4 BMPColor = {
+                255.0f * LinearToSRGB(color.r),
+                255.0f * LinearToSRGB(color.g),
+                255.0f * LinearToSRGB(color.b), 
+                255.0f
+            }; 
+            unsigned int BMPValue = BGRAPack4x8(BMPColor);
+            *out++ = BMPValue; // ARGB
+        }
+        out += g_image.width - texel.width;
+    }
 }
 
 rtas_node_t GenerateAccelerationStructure(world_t *world)
 {
     rtas_node_t accel;
     void AdoptChildren(rtas_node_t &node, rtas_node_t B);
+
+    // early exit if the scene does not contain meshes.
+    if (nc_sbcount(world->meshes) == 0)
+    {
+        accel.triangleCount = 0;
+        return accel;
+    }
 
     float sep = WORLD_SIZE / float(1<<LEVELS);
     int leavesCount, nodesCount, halfLeavesCount;
@@ -1066,7 +1258,7 @@ rtas_node_t GenerateAccelerationStructure(world_t *world)
                     float len=Magnitude(dir);
                     bool exitedEarly;
                     int faceHitIdx;
-                    float t=doesRayIntersectWithAABB2(A, B, minHitDistance, box, &exitedEarly, &faceHitIdx);
+                    float t=RayIntersectWithAABB2(A, B, minHitDistance, box, &exitedEarly, &faceHitIdx);
                     return t!=minHitDistance && t <= len;
                 }
 
@@ -1340,7 +1532,7 @@ void LoadGltf()
     } while(0);
 }
 
-v3 brdf_diff(material_t &mat, v3 surfPoint)
+v3 BrdfDiff(material_t &mat, v3 surfPoint)
 {
     float piTerm=1.f/PI;
     if (mat.albedoIdx==0) {
@@ -1355,7 +1547,7 @@ v3 brdf_diff(material_t &mat, v3 surfPoint)
     return piTerm*V3(1.f,1.f,1.f);
 }
 
-v3 brdf_specular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness)
+v3 BrdfSpecular(material_t &mat, v3 surfPoint, v3 normal, v3 L, v3 V, v3 H, float roughness)
 {
     // Via the material mapping (might be UVs or some other function), sample the texture.
     v2 uv = {surfPoint.x,surfPoint.y};//for now.
@@ -1822,21 +2014,32 @@ plane_t MakeGroundPlane(unsigned int mat){
 }
 
 void PrintHelp() {
-    printf("t<int>                        - Set the number of threads to use.\n");
-    printf("p<int>                        - Set the rays to shoot per pixel.\n");
-    printf("w<int>                        - Set the world number to load. Possible options:\n"
-           "\t1:\tDefault scene.\n"
-           "\t2:\tMetal-roughness test.\n"
-           "\t3:\tCornell box.\n"
-           "\t4:\tRay Tracing in One Weekend book cover.\n"
-           "\t5:\tMario N64 model.\n"
+
+    // print the usage first.
+    printf ( "usage: Pathtracer.exe [options]\n" );
+
+    // print description.
+    printf ( "\nPhysically-based Path Tracer capable of rendering various geometrical shapes, including triangles.\n" );
+
+    printf ( "Written by Noah J. Cabral.\n\n" );
+
+    printf ( "optional arguments:\n" );
+
+    printf("\tt<int>                        - Set the number of threads to use.\n");
+    printf("\tp<int>                        - Set the rays to shoot per pixel.\n");
+    printf("\tw<int>                        - Set the world number to load. Possible options:\n"
+           "\t\t1:\tDefault scene.\n"
+           "\t\t2:\tMetal-roughness test.\n"
+           "\t\t3:\tCornell box.\n"
+           "\t\t4:\tRay Tracing in One Weekend book cover.\n"
+           "\t\t5:\tMario N64 model.\n"
     );
     
-    printf("d                             - Enable depth of field via thin-lens approximation.\n");
-    printf("n                             - Disable loading normal map textures.\n");
-    printf("m                             - Disable loading metalness material textures.\n");
-    printf("r                             - Disable loading roughness material textures.\n");
-    printf("h                             - Print this help menu.\n");
+    printf("\td                             - Enable depth of field via thin-lens approximation.\n");
+    printf("\tn                             - Disable loading normal map textures.\n");
+    printf("\tm                             - Disable loading metalness material textures.\n");
+    printf("\tr                             - Disable loading roughness material textures.\n");
+    printf("\th                             - Print this help menu.\n");
     
 }
 
@@ -1866,7 +2069,7 @@ void ParseArgs() {
                         break;
                     case 'r': g_bRoughness=false;
                         break;
-                    case 'h': PrintHelp();
+                    case 'h': PrintHelp(); exit(0);
                         break;
                     case 'w': g_worldKind=(world_kind_t)max(0,min(WORLD_KIND_COUNT-1,atoi(argv[0])-1));
                         break;
@@ -1884,7 +2087,7 @@ void DefineCamera(camera_t *c) {
     // By this point, the "user set" parameters are:
     // pos, use_pinhole, fov, focalDistance, aperatureRadius, and target.
 
-    c->axisZ = (c->use_pinhole)? Normalize(c->pos-c->target) : -Normalize(c->pos-c->target);
+    c->axisZ = Normalize(c->pos - c->target);
     c->axisX = Normalize(Cross(V3(0,0,1), c->axisZ));
     c->axisY = Normalize(Cross(c->axisZ, c->axisX));
 
@@ -1906,7 +2109,9 @@ void DefineCamera(camera_t *c) {
     c->halfFilmWidth  = c->filmWidth / 2.0f;
     c->halfFilmHeight = c->filmHeight / 2.0f;
 
-    c->filmCenter = c->pos - c->focalLength * c->axisZ;
+    // the frustrumCenter is offset from the camera in the direction
+    // towards the target; i.e. the camera viewing direction.
+    c->frustrumCenter = c->pos - c->focalLength * c->axisZ;
 
     // NOTE: This indeed looks odd at first glance. This is correct. Check the usage.
     // Where it's used, we're working in a stretched film space by factor 2.
@@ -1915,11 +2120,12 @@ void DefineCamera(camera_t *c) {
 
     // print infos.
     {
-        PlatformLoggerLog("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
-        PlatformLoggerLog("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
-        PlatformLoggerLog("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
-        PlatformLoggerLog("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
-        PlatformLoggerLog(
+        printf("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
+        printf("focalLength: %f\n", c->focalLength);
+        printf("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
+        printf("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
+        printf("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
+        printf(
         "c->axisX and Y define the plane where the film plane is embedded.\n"
         "rays are shot originating from the film and through the lens located at c->pos.\n"
         "the camera has a local coordinate system which is different from the world coordinate system.\n");

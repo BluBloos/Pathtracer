@@ -48,7 +48,7 @@ approach because I was looking for a coding adventure :)
 
 # Usage
 
-e.g.: "AutomataApp.exe -t16 -p16 -nmr"
+e.g.: "Pathtracer.exe -t16 -p16 -nmr"
 ```
 t<int>                        - Set the number of threads to use.
 p<int>                        - Set the rays to shoot per pixel.
@@ -67,18 +67,34 @@ h                             - Print this help menu.
 ```
 # Steps for Building
 
-This project depends on my game engine, Automata-Engine. You can find that here: https://github.com/BluBloos/Automata-Engine
-
-The engine has its own dependencies, but the TLDR is:
-- this project only works on Windows
-- install Python and make sure its on your PATH
-- install MS Visual Studio 2022, community ed. and ensure it is located at "C:\Program Files"
-
-To build and run the raytracer on the scene, please run the following.
-
-```bash
-build.bat
-bin\AutomataApp.exe
-```
+After setting up the build environment, simply run build.bat.
 
 Happy path tracing!
+
+## Build Environment Setup
+
+Building the codebase can be done in a terminal which is equipped with the
+ability to call either MSVC or Clang from command line.
+
+This is generally done by calling `vcvarsall.bat x64`, which is included in the
+Microsoft C/C++ Build Tools. This script is automatically called by the `x64
+Native Tools Command Prompt for VS <year>` variant of the vanilla `cmd.exe`. If
+you've installed the build tools, this command prompt may be easily located by
+searching for `Native` from the Windows Start Menu search.
+
+You can ensure that the MSVC compiler is accessible from your command line by
+running:
+
+```
+cl
+```
+
+If everything is set up correctly, you should have output very similar to the
+following:
+
+```
+Microsoft (R) C/C++ Optimizing Compiler Version 19.29.30151 for x64
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+usage: cl [ option... ] filename... [ /link linkoption... ]
+```
