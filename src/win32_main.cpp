@@ -905,7 +905,7 @@ DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
 #undef PIXELS_PER_TEXEL
     
     WriteDIBImage(g_image, "test.bmp");
-    printf("Done. Image written to test.bmp\n");
+    printf("Done. Image written to test.bmp.\n");
     ExitThread(0);
 }
 
@@ -2103,15 +2103,19 @@ void DefineCamera(camera_t *c) {
 
     // print infos.
     {
-        printf("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
-        printf("focalLength: %f\n", c->focalLength);
+        printf("DefineCamera():\n===\n");
+        printf("camera located at c->pos = (%f,%f,%f)\n", c->pos.x,c->pos.y,
+            c->pos.z);
+        printf("Distance between the lens and the film plane: %f\n", 
+            c->focalLength);
         printf("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
         printf("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
         printf("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
         printf(
-        "c->axisX and Y define the plane where the film plane is embedded.\n"
-        "rays are shot originating from the film and through the lens located at c->pos.\n"
-        "the camera has a local coordinate system which is different from the world coordinate system.\n");
+        "The film plane is embedded in the plane defined by c->axisX and c->axisY.\n"
+        "Rays are shot originating at the lens located at c->pos and \"strike a sensor on the film to develop the image\".\n"
+        "The camera has a local coordinate system which is different from the world coordinate system.\n"
+        "The camera is looking down the negative c->axisZ direction.\n\n");
     }
 }
 
