@@ -835,72 +835,52 @@ DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
     uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * 
         g_image.height) / (float)(PIXELS_PER_TEXEL * g_tc));
 
-#if 0
-    PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
-#endif
-
     HANDLE threadHandles[MAX_THREAD_COUNT];
-    uint32_t xPos = 0;
-    uint32_t yPos = 0;
 
-    // TODO: Could do entire image as BSP tree -> assign threads to these regions.
-    // then break up these regions into texels.
     texel_t *texels = nullptr;
     std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
 
-    for (uint32_t i = 0; i < g_tc; i++) {
-        for (uint32_t j = 0; j < maxTexelsPerThread; j++) {
+    for (int y = 0; y < g_image.height; y += THREAD_GROUP_SIZE)
+    for (int x = 0; x < g_image.width; x += THREAD_GROUP_SIZE)
+    {
+        texel_t texel;
+        texel.width = THREAD_GROUP_SIZE;
+        texel.height = THREAD_GROUP_SIZE;
+        texel.xPos = x;
+        texel.yPos = y;
 
-            texel_t texel;
-            texel.width = THREAD_GROUP_SIZE;
-            texel.height = THREAD_GROUP_SIZE;
-            texel.xPos = xPos;
-            texel.yPos = yPos;
-            xPos += THREAD_GROUP_SIZE;
-            bool isPartialTexel = false;
+        // clip the edges if needed.
+        texel.width = min((texel.xPos + THREAD_GROUP_SIZE), g_image.width) - 
+            texel.xPos;
+        texel.height = min((texel.yPos + THREAD_GROUP_SIZE), g_image.height) - 
+            texel.yPos;
 
-            if (texel.yPos + texel.height > g_image.height) {
-                texel.height -= (texel.yPos + texel.height) - g_image.height;
-                texel.height = max(texel.height, 0);
-                isPartialTexel = true;
-            }
 
-            if (xPos >= g_image.width) {
-                if (xPos > g_image.width) {
-                    texel.width -= xPos - g_image.width;
-                    texel.width = max(texel.width, 0);
-                    isPartialTexel = true;
-                }
-
-                xPos = 0;
-                yPos += THREAD_GROUP_SIZE;
-            }
-
-            if ( texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.
-                width) && texel.yPos >= 0 && (texel.yPos + texel.height <= 
-                g_image.height) 
-            ) {
-                if (isPartialTexel) j--; // NOTE: This is hack ...
-                nc_sbpush(texels, texel);
-            } else {
+        if ( texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.
+            width) && texel.yPos >= 0 && (texel.yPos + texel.height <= 
+            g_image.height) 
+        ) {
+            nc_sbpush(texels, texel);
+        } else {
 #if 1
-                printf("found invalid texel:");
-                printf("with x: %d, ", texel.xPos);
-                printf("with y: %d\n", texel.yPos);
+            printf("found invalid texel:");
+            printf("with x: %d, ", texel.xPos);
+            printf("with y: %d\n", texel.yPos);
 #endif
-            }
         }
+
     }
 
     // NOTE: The reason we split up the for-loop is because texels base addr
-    // is not stable until we have finished pushing (this is due to stretchy buff logic).
-    for (uint32_t i = 0; i < g_tc; i++) {
+    // is not stable until we have finished pushing (this is due to stretchy 
+    // buff logic).
+    for (uint32_t i = 0; i < g_tc; i++)
+    {
+        texel_t *base = texels + i * maxTexelsPerThread;
+        uint32_t count = (i + 1 < g_tc) ? maxTexelsPerThread :
+            nc_sbcount(texels) - (g_tc - 1) * maxTexelsPerThread;
 
-        texelParams[i] = std::make_tuple(
-            texels + i * maxTexelsPerThread,
-            (i + 1 < g_tc) ? maxTexelsPerThread :
-            nc_sbcount(texels) - (g_tc - 1) * maxTexelsPerThread
-        );
+        texelParams[i] = std::make_tuple( base, count );
 
         threadHandles[i] = CreateThread(
             nullptr,
