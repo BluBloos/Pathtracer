@@ -295,11 +295,7 @@ IF_V1 void IF_blit_to_window_surface(IF_window_handle_t hdl, void *pixels,
 
     info.bmiHeader.biSize = sizeof(info.bmiHeader);
 	info.bmiHeader.biWidth = pixels_info->width;
-	info.bmiHeader.biHeight = -pixels_info->height; // NOTE: the negative sign
-                                                    // is important to ensure
-                                                    // that saved .BMP is same
-                                                    // orientation as rendered 
-                                                    // image.
+	info.bmiHeader.biHeight = pixels_info->height;
 	info.bmiHeader.biPlanes = 1;
 	info.bmiHeader.biBitCount = 32;
 	info.bmiHeader.biCompression = BI_RGB;

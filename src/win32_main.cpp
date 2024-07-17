@@ -58,6 +58,7 @@ static ray_payload_t RayCastIntersect(world_t *world, const v3 &rayOrigin,
     const v3 &rayDirection);
 
 // MISC HELPER FUNCTIONS.
+void WriteDIBImage(image_32_t image, const char *fileName);
 image_32_t AllocateImage(unsigned int width, unsigned int height);
 mipchain_t GenerateMipmapChain(texture_t tex);
 /*
@@ -326,8 +327,7 @@ static image_32_t AllocateImage(unsigned int width, unsigned int height)
     return newImage;
 }
 
-static void WriteImage(image_32_t image, const char *fileName, bool 
-    bFlip=false) 
+void WriteDIBImage(image_32_t image, const char *fileName) 
 {
     void *pixels;
     unsigned int outputPixelSize = GetTotalPixelSize(image);
@@ -343,6 +343,9 @@ static void WriteImage(image_32_t image, const char *fileName, bool
     header.BitmapOffset = sizeof(header); 
     header.size = 40;    
     header.Width = image.width;  
+    // NOTE: with a positive value for Height, the image is a Bottom-up DIB,
+    // where the pixel data starts with the bottom row and progresses to the
+    // top.
     header.Height = image.height;
     header.Planes = 1;          
     header.BitsPerPixel = 32;    
@@ -351,15 +354,7 @@ static void WriteImage(image_32_t image, const char *fileName, bool
 
     if(fileHandle) {
         fwrite(&header, sizeof(header), 1, fileHandle);
-
-        if (bFlip) {
-            for ( 
-                unsigned int *pi=image.pixelPointer+image.width*image.height-1, 
-                *pp=(unsigned int*)pixels;pi>=image.pixelPointer; ) *pp++=*pi--;
-            
-            fwrite(pixels, outputPixelSize, 1, fileHandle);
-        } else fwrite(image.pixelPointer, outputPixelSize, 1, fileHandle);
-
+        fwrite(image.pixelPointer, outputPixelSize, 1, fileHandle);
         fclose(fileHandle);
     }
     else {
@@ -926,8 +921,7 @@ DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
 
 #undef PIXELS_PER_TEXEL
     
-    bool bFlip=true;
-    WriteImage(g_image, "test.bmp",bFlip);
+    WriteDIBImage(g_image, "test.bmp");
     printf("Done. Image written to test.bmp\n");
     ExitThread(0);
 }
@@ -938,16 +932,18 @@ void RenderTexel( unsigned int *out, texel_t texel )
     // Raytracer works by averaging all colors from all rays shot from this 
     // pixel.
 
-    for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++) {
-        float filmY = -1.0f + 2.0f * (float)y / (float)g_image.height;
-
-        for (
-            unsigned int x = texel.xPos;
-            x < (texel.width + texel.xPos); x++) 
+    for (unsigned int y = texel.yPos; y < (texel.height + texel.yPos); y++)
+    {
+        for ( unsigned int x = texel.xPos; x < (texel.width + texel.xPos); x++) 
         {
             
-            // filmX and filmY are values in the range [-1,1].
-            float filmX = -1.0f + 2.0f * (float)x / (float)g_image.width;
+            // frustrum vals are values in the range [-1,1].
+            // the frustrum plane is that from the camera and in the direction
+            // of the scene.
+            const float frustrumY = -1.0f + 2.0f * (float)y / (float)g_image.
+                height;
+            const float frustrumX = -1.0f + 2.0f * (float)x / (float)g_image.
+                width;
 
             v3 color = {};
             v3 radiance = {};
@@ -960,41 +956,60 @@ void RenderTexel( unsigned int *out, texel_t texel )
             constexpr bool bVarRender = g_debugRenderKind == 
                 debug_render_kind_t::variance;
             
+            /* 
+            how does the decltype thing work? well, lambda syntax is 
+            shorthand for defining a new functor type.
+            we use decltype to get that functor type back for giving to 
+            the template, as required. 
+            */
+
+            std::unique_ptr<v3, decltype(MallocDeleter)> 
+                vListManager { bVarRender ? (v3*)malloc( g_pp *g_pp * 
+                    sizeof(v3)) : nullptr };
+            v3 *vList = vListManager.get();
+
+            // pinhole does not have depth of field.
             if ( g_camera.use_pinhole ) {
+
+                v3 pinhole = g_camera.pos; 
                 
                 float contrib;
-                v3 rayDirection,filmP,rayOrigin = g_camera.pos;
+                v3 rayDirection, frustrumP;
 
-                std::unique_ptr<v3, 
-                    /* how does the decltype thing work? well, lambda syntax is shorthand for defining a new functor type.
-                    we use decltype to get that functor type back for giving to the template, as required. */
-                    decltype(MallocDeleter)> vListManager { bVarRender ? (v3*)malloc(g_pp*g_pp*sizeof(v3)) : nullptr };
-                v3 *vList = vListManager.get();
-
+                // cast a number of rays per pixel in a statified manner.
                 contrib = 1.0f / (float)g_pp / (float)g_pp;
                 for (int i = 0;i < g_pp;i++) {
                     for (int j = 0;j < g_pp;j++) {
 
-                        float llpixelX = filmX - 1.f * g_camera.halfFilmPixelW;
-                        float llpixelY = filmY - 1.f * g_camera.halfFilmPixelH;
+                        float llpixelX = frustrumX - 1.f * g_camera.
+                            halfFilmPixelW;
+                        float llpixelY = frustrumY - 1.f * g_camera.
+                            halfFilmPixelH;
                         float stepX = 1.f / g_pp * g_camera.halfFilmPixelW*2.f;
                         float stepY = 1.f / g_pp * g_camera.halfFilmPixelH*2.f;
-                        //float halfStep = step / 2.f;
-                        float xStep = llpixelX + float(i) / g_pp * g_camera.halfFilmPixelW + stepX*0.5f;
-                        float yStep = llpixelY + float(j) / g_pp * g_camera.halfFilmPixelH + stepY*0.5f;
+
+                        float xStep = llpixelX + float(i) / g_pp * g_camera.
+                            halfFilmPixelW + stepX*0.5f;
+                        float yStep = llpixelY + float(j) / g_pp * g_camera.
+                            halfFilmPixelH + stepY*0.5f;
                         
                         xStep += (RandomUnilateral() - 0.5f) * stepX;
                         yStep += (RandomUnilateral() - 0.5f) * stepY;
 
-                        filmP = g_camera.filmCenter + 
+                        frustrumP = g_camera.frustrumCenter + 
                             ( xStep * g_camera.halfFilmWidth * g_camera.axisX) +
                             ( yStep * g_camera.halfFilmHeight * g_camera.axisY);
-                        rayDirection = Normalize(filmP - g_camera.pos);
 
-                        radiance=RayCast(&g_world, rayOrigin, rayDirection,0);
-                        if (IsNaN(radiance)) {j--;continue;}//try again.
+                        // towards the film means towards the scene.
+                        rayDirection = Normalize(frustrumP - pinhole);
+
+                        radiance = RayCast(&g_world, pinhole, rayDirection,0);
+
+                        if (IsNaN(radiance)) {j--; continue;} // try again.
                         color = color + contrib * radiance;
-                        if constexpr (bVarRender) vList[i * g_pp + j] = radiance;
+
+                        if constexpr (bVarRender) vList[i * g_pp + j] = 
+                            radiance;
                     }
                 }
 
@@ -1006,15 +1021,19 @@ void RenderTexel( unsigned int *out, texel_t texel )
                     color=var;
                 }
 
-            } else // if not the pinhole model, we use a more physical camera model with a real aperature and lens.
+            } 
+            // if not the pinhole model, we use a more physical camera model 
+            // with a real aperature and lens.
+            else 
             {
-                assert(bVarRender==false&&"not supported");
+                assert(bVarRender == false && "not supported");
 
                 float contrib = 1.0f / (float)g_pp/(float)g_pp;
 
                 // the poisson disk samples
-                const int NUM_SAMPLES = 12;     // the number of samples to take.
-                //const float PI = 3.14159265359f; // the value of PI.
+                // the number of samples to take.
+                const int NUM_SAMPLES = 12;     
+
                 static const v2 poissonDisk[NUM_SAMPLES] = {
                     V2(0.0, 0.0),
                     V2(-0.94201624, -0.39906216),
@@ -1030,36 +1049,60 @@ void RenderTexel( unsigned int *out, texel_t texel )
                     V2(-0.26496911, -0.41893023)
                 };
 
+                v3 lensCenter = g_camera.pos;
+
                 for (unsigned int rayIndex = 0; rayIndex < g_pp; rayIndex++) { // integrate across image sensor.
                     
-                    float offX = filmX + (RandomBilateral() * g_camera.halfFilmPixelW);
-                    float offY = filmY + (RandomBilateral() * g_camera.halfFilmPixelH);
-                    v3 filmP = g_camera.filmCenter + (offX * g_camera.halfFilmWidth * g_camera.axisX) + (offY * g_camera.halfFilmHeight * g_camera.axisY);
-                    v3 rayOrigin = g_camera.pos;
-                    v3 rayDirection = Normalize(g_camera.pos-filmP);
+                    float offX = frustrumX + (RandomBilateral() * g_camera.
+                        halfFilmPixelW);
+                    float offY = frustrumY + (RandomBilateral() * g_camera.
+                        halfFilmPixelH);
+
+                    v3 frustrumP = g_camera.frustrumCenter + 
+                        (offX * g_camera.halfFilmWidth * g_camera.axisX) + 
+                        (offY * g_camera.halfFilmHeight * g_camera.axisY);
+
+                    v3 rayDirection = Normalize(frustrumP - lensCenter);
 
                     // intersect with focal plane.
                     // https://computergraphics.stackexchange.com/questions/246/how-to-build-a-decent-lens-camera-objective-model-for-path-tracing
                     // 1/f = 1/v + 1/b.
-                    float focalPlaneDist = 1.f/(1.f/FIXED_FOCAL_LENGTH - 1.f/g_camera.focalLength);
-                    v3 planePoint,N= g_camera.axisZ,focalPoint;
-                    planePoint = g_camera.pos + g_camera.axisX + focalPlaneDist*N;
-                    float d = Dot(N,planePoint);
+                    float focalPlaneDist = 1.f/(
+                        1.f/FIXED_FOCAL_LENGTH - 1.f/g_camera.focalLength);
+                    v3 planePoint, N = -g_camera.axisZ, focalPoint;
+                    planePoint = 
+                        lensCenter + g_camera.axisX + focalPlaneDist * N;
+                    float d = Dot(N, planePoint);
 
-                    float t=RayIntersectPlane(rayOrigin, rayDirection, N, d, MIN_HIT_DISTANCE);
-                    assert(t!=MIN_HIT_DISTANCE);
+                    float t = RayIntersectPlane( lensCenter, rayDirection, 
+                        N, d, MIN_HIT_DISTANCE);
 
-                    focalPoint=rayOrigin+t*rayDirection;
+                    assert(t > MIN_HIT_DISTANCE);
+
+                    focalPoint = lensCenter + t * rayDirection;
 
                     // sample poisson disk point.
-                    for (unsigned int rayIndex2 = 0; rayIndex2 < g_pp; rayIndex2++) {
+                    for (
+                        unsigned int rayIndex2 = 0;
+                        rayIndex2 < g_pp; rayIndex2++) 
+                    {
 
-                        v2 diskSample=poissonDisk[(rayIndex2*rayIndex)%NUM_SAMPLES];
-                        v3 rayOriginDisk,rayDirectionDisk;
-                        rayOriginDisk = rayOrigin + diskSample.x*g_camera.aperatureRadius*g_camera.axisX + diskSample.y*g_camera.aperatureRadius*g_camera.axisY;
-                        rayDirectionDisk=Normalize(focalPoint-rayOriginDisk);
+                        v2 diskSample = poissonDisk[
+                            (rayIndex2 * rayIndex) % NUM_SAMPLES];
 
-                        radiance=RayCast(&g_world, rayOriginDisk, rayDirectionDisk, 0);
+                        v3 rayOriginDisk, rayDirectionDisk;
+
+                        rayOriginDisk = lensCenter + diskSample.x * 
+                            g_camera.aperatureRadius * g_camera.axisX + 
+                            diskSample.y * g_camera.aperatureRadius * 
+                            g_camera.axisY;
+
+                        rayDirectionDisk = Normalize(focalPoint -   
+                            rayOriginDisk);
+
+                        radiance = RayCast(&g_world, rayOriginDisk,
+                            rayDirectionDisk, 0);
+
                         if (IsNaN(radiance)) {rayIndex2--;continue;}//try again.
                         color = color + contrib * radiance;
                     }
@@ -2044,7 +2087,7 @@ void DefineCamera(camera_t *c) {
     // By this point, the "user set" parameters are:
     // pos, use_pinhole, fov, focalDistance, aperatureRadius, and target.
 
-    c->axisZ = (c->use_pinhole)? Normalize(c->pos-c->target) : -Normalize(c->pos-c->target);
+    c->axisZ = Normalize(c->pos - c->target);
     c->axisX = Normalize(Cross(V3(0,0,1), c->axisZ));
     c->axisY = Normalize(Cross(c->axisZ, c->axisX));
 
@@ -2066,7 +2109,9 @@ void DefineCamera(camera_t *c) {
     c->halfFilmWidth  = c->filmWidth / 2.0f;
     c->halfFilmHeight = c->filmHeight / 2.0f;
 
-    c->filmCenter = c->pos - c->focalLength * c->axisZ;
+    // the frustrumCenter is offset from the camera in the direction
+    // towards the target; i.e. the camera viewing direction.
+    c->frustrumCenter = c->pos - c->focalLength * c->axisZ;
 
     // NOTE: This indeed looks odd at first glance. This is correct. Check the usage.
     // Where it's used, we're working in a stretched film space by factor 2.
@@ -2076,6 +2121,7 @@ void DefineCamera(camera_t *c) {
     // print infos.
     {
         printf("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
+        printf("focalLength: %f\n", c->focalLength);
         printf("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
         printf("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
         printf("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
