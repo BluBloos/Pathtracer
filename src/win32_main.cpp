@@ -859,19 +859,7 @@ DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
             texel.yPos;
 
 
-        if ( texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.
-            width) && texel.yPos >= 0 && (texel.yPos + texel.height <= 
-            g_image.height) 
-        ) {
-            nc_sbpush(texels, texel);
-        } else {
-#if 1
-            printf("found invalid texel:");
-            printf("with x: %d, ", texel.xPos);
-            printf("with y: %d\n", texel.yPos);
-#endif
-        }
-
+        nc_sbpush(texels, texel);
     }
 
     // NOTE: The reason we split up the for-loop is because texels base addr
