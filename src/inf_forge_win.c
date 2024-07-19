@@ -220,7 +220,8 @@ IF_API IF_window_handle_t IF_create_window_ex(IF_create_window_info_t *pinfo)
 
 // this function cannot be called from a DLL because then the classatom
 // will _not_ be automatically unregistered when the application terminates.
-IF_V1 IF_window_handle_t IF_create_window(int width, int height, char *title)
+IF_V1 IF_window_handle_t IF_create_window(int width, int height, 
+    const char *title)
 {
     IF_create_window_info_t info;
     IF_zero(info);
@@ -250,6 +251,13 @@ static LRESULT CALLBACK win32_window_proc(HWND window, UINT message, WPARAM wpar
     switch (message)
     {
     case WM_CLOSE: {
+        // TODO: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-quit
+        // tells us that we should not be posting WM_QUIT this way ... ?
+        // says we should use PostQuitMessage. the problem would then be that
+        // the message is posted to the application. we don't really want that
+        // because why would closing a window close the app? the way we do it
+        // here is actually correct for our purposes and currently works.
+        // I'm not sure why the MSDN documentation makes this remark?
         HWND   hWnd = window;
         UINT   Msg = WM_QUIT;
         WPARAM wParam = 0;

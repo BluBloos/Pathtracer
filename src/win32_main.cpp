@@ -211,7 +211,7 @@ FUTURE WORK:
 */
 
 
-void main() 
+int main() 
 {
     ParseArgs();
 
@@ -275,6 +275,7 @@ void main()
 
     IF_close_window(window);
 
+    return 0;
 }
 
 // okay, this is really bad from, but depending on the template argument (which Pdf to eval),
@@ -291,6 +292,8 @@ float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f))
         case COSINE_PDF: return max(0.f,Dot(V3(0,0,1), dir)/PI); break;
         default: assert(false);//not supported.
     }
+
+    return 0.f;
 }
 
 template<>
@@ -798,6 +801,16 @@ bool IsNotEmissive(const material_t& m){
     return (m.emitColor==V3(0,0,0));
 }
 
+typedef struct {
+    texel_t texel;
+    bool done;
+    bool shouldquit;
+} render_thread_data_t;
+
+// NOTE: apparently these intrinsics are deprecated but what the hell, I want
+// to program in C, not C++ !?
+#define WriteGlobals() _WriteBarrier(), MemoryBarrier()
+#define PrepareGlobals() _ReadBarrier(), MemoryBarrier()
 
 // NOTE: 
 // Here's some documentation on some of the first multithreading bugs I have ever encountered!
@@ -812,108 +825,130 @@ bool IsNotEmissive(const material_t& m){
 // the texels arr is updated for all threads.
 DWORD WINAPI RenderThread(_In_ LPVOID lpParameter)
 {
-    std::tuple<texel_t *, uint32_t> *ptr_to_tuple = 
-        (std::tuple<texel_t *, uint32_t> *)lpParameter;
-    texel_t *texels = std::get<0>(*ptr_to_tuple);
+    render_thread_data_t *pdata = (render_thread_data_t *)lpParameter;
 
-    for (uint32_t i = 0; i < std::get<1>(*ptr_to_tuple); i++)
+    PrepareGlobals();
+
+    if (pdata)
+    while (!pdata->shouldquit)
     {
-        texel_t texel = texels[i];
-        unsigned int *out =
-            g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
+        PrepareGlobals(); if ( !pdata->done )
+        {
+            texel_t texel = pdata->texel;
+            unsigned int *out =
+                g_image.pixelPointer + texel.yPos * g_image.width + texel.xPos;
 
-        RenderTexel( out, texel );
+            RenderTexel( out, texel );
+
+            WriteGlobals();
+
+            pdata->done = true;
+        }
     }
 
     ExitThread(0);
 }
 
+render_thread_data_t g_renderdata[MAX_THREAD_COUNT];
+
 DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
 
 #define PIXELS_PER_TEXEL (THREAD_GROUP_SIZE * THREAD_GROUP_SIZE)
 
-    uint32_t maxTexelsPerThread = (uint32_t)ceilf((float)(g_image.width * 
-        g_image.height) / (float)(PIXELS_PER_TEXEL * g_tc));
-
-#if 0
-    PlatformLoggerLog("maxTexelsPerThread: %d", maxTexelsPerThread);
-#endif
-
     HANDLE threadHandles[MAX_THREAD_COUNT];
-    uint32_t xPos = 0;
-    uint32_t yPos = 0;
 
-    // TODO: Could do entire image as BSP tree -> assign threads to these regions.
-    // then break up these regions into texels.
     texel_t *texels = nullptr;
-    std::tuple<texel_t *, uint32_t> texelParams[MAX_THREAD_COUNT];
 
-    for (uint32_t i = 0; i < g_tc; i++) {
-        for (uint32_t j = 0; j < maxTexelsPerThread; j++) {
 
-            texel_t texel;
-            texel.width = THREAD_GROUP_SIZE;
-            texel.height = THREAD_GROUP_SIZE;
-            texel.xPos = xPos;
-            texel.yPos = yPos;
-            xPos += THREAD_GROUP_SIZE;
-            bool isPartialTexel = false;
+    for (int y = 0; y < g_image.height; y += THREAD_GROUP_SIZE)
+    for (int x = 0; x < g_image.width; x += THREAD_GROUP_SIZE)
+    {
+        texel_t texel;
+        texel.width = THREAD_GROUP_SIZE;
+        texel.height = THREAD_GROUP_SIZE;
+        texel.xPos = x;
+        texel.yPos = y;
 
-            if (texel.yPos + texel.height > g_image.height) {
-                texel.height -= (texel.yPos + texel.height) - g_image.height;
-                texel.height = max(texel.height, 0);
-                isPartialTexel = true;
-            }
+        // clip the edges if needed.
+        texel.width = min((texel.xPos + THREAD_GROUP_SIZE), g_image.width) - 
+            texel.xPos;
+        texel.height = min((texel.yPos + THREAD_GROUP_SIZE), g_image.height) - 
+            texel.yPos;
 
-            if (xPos >= g_image.width) {
-                if (xPos > g_image.width) {
-                    texel.width -= xPos - g_image.width;
-                    texel.width = max(texel.width, 0);
-                    isPartialTexel = true;
-                }
-
-                xPos = 0;
-                yPos += THREAD_GROUP_SIZE;
-            }
-
-            if ( texel.xPos >= 0 && (texel.xPos + texel.width <= g_image.
-                width) && texel.yPos >= 0 && (texel.yPos + texel.height <= 
-                g_image.height) 
-            ) {
-                if (isPartialTexel) j--; // NOTE: This is hack ...
-                nc_sbpush(texels, texel);
-            } else {
-#if 1
-                printf("found invalid texel:");
-                printf("with x: %d, ", texel.xPos);
-                printf("with y: %d\n", texel.yPos);
-#endif
-            }
-        }
+        nc_sbpush(texels, texel);
     }
 
-    // NOTE: The reason we split up the for-loop is because texels base addr
-    // is not stable until we have finished pushing (this is due to stretchy buff logic).
-    for (uint32_t i = 0; i < g_tc; i++) {
+    int threadcount = min(g_tc, nc_sbcount(texels));
 
-        texelParams[i] = std::make_tuple(
-            texels + i * maxTexelsPerThread,
-            (i + 1 < g_tc) ? maxTexelsPerThread :
-            nc_sbcount(texels) - (g_tc - 1) * maxTexelsPerThread
-        );
+    // spawn the render threads.
+    //
+    // NOTE: The reason we split up the for-loop is because texels base addr
+    // is not stable until we have finished pushing (this is due to stretchy 
+    // buff logic).
+    for (int i = 0; i < threadcount; i++)
+    {
+        render_thread_data_t data;
+
+        texel_t texel = texels[i];
+        data.texel = texel;
+        data.done = false;
+        data.shouldquit = false;
+        g_renderdata[i] = data;
+
+        WriteGlobals();
 
         threadHandles[i] = CreateThread(
             nullptr,
             0, // default stack size.
             RenderThread,
-            (LPVOID)&texelParams[i],
+            (LPVOID)&g_renderdata[i],
             0, // thread runs immediately after creation.
             nullptr
         );
     }
 
+    // when render threads are done their texel, give them another one
+    // until there are no texels left.
+    for (int i = threadcount; i < nc_sbcount(texels); i++ )
+    {
+        texel_t texel = texels[i];
+
+        for (int j = 0; j < threadcount; j++) {
+
+            render_thread_data_t *pdata = &g_renderdata[j];
+
+            PrepareGlobals(); if (pdata->done) {
+
+                pdata->texel = texels[i];
+
+                WriteGlobals();
+
+                pdata->done = false;
+
+                i++;
+                break;
+            }
+        }
+
+        i--; // if no threads were complete their work we need to wait.
+        //std::this_thread::yield();
+    }
+
+    // signal for all threads to complete.
+    for (int i = 0; i < threadcount; i++) {
+
+        render_thread_data_t *pdata = &g_renderdata[i];
+
+        if (pdata->done) {
+            g_renderdata[i].shouldquit = true;
+            WriteGlobals();
+        } else {
+            i--; // cannot continue until this thread is complete.
+        }
+    }
+
     // wait for all threads to complete.
-    for (uint32_t i = 0; i < g_tc; i++) {
+    for (int i = 0; i < threadcount; i++) {
         WaitForSingleObject(threadHandles[i], INFINITE);
     }
 
@@ -922,7 +957,7 @@ DWORD WINAPI MasterThread(_In_ LPVOID lpParameter) {
 #undef PIXELS_PER_TEXEL
     
     WriteDIBImage(g_image, "test.bmp");
-    printf("Done. Image written to test.bmp\n");
+    printf("Done. Image written to test.bmp.\n");
     ExitThread(0);
 }
 
@@ -2120,15 +2155,19 @@ void DefineCamera(camera_t *c) {
 
     // print infos.
     {
-        printf("camera located at (%f,%f,%f)\n", c->pos.x,c->pos.y,c->pos.z);
-        printf("focalLength: %f\n", c->focalLength);
+        printf("DefineCamera():\n===\n");
+        printf("camera located at c->pos = (%f,%f,%f)\n", c->pos.x,c->pos.y,
+            c->pos.z);
+        printf("Distance between the lens and the film plane: %f\n", 
+            c->focalLength);
         printf("c->axisX: (%f,%f,%f)\n", c->axisX.x,c->axisX.y,c->axisX.z);
         printf("c->axisY: (%f,%f,%f)\n", c->axisY.x,c->axisY.y,c->axisY.z);
         printf("c->axisZ: (%f,%f,%f)\n", c->axisZ.x,c->axisZ.y,c->axisZ.z);
         printf(
-        "c->axisX and Y define the plane where the film plane is embedded.\n"
-        "rays are shot originating from the film and through the lens located at c->pos.\n"
-        "the camera has a local coordinate system which is different from the world coordinate system.\n");
+        "The film plane is embedded in the plane defined by c->axisX and c->axisY.\n"
+        "Rays are shot originating at the lens located at c->pos and \"strike a sensor on the film to develop the image\".\n"
+        "The camera has a local coordinate system which is different from the world coordinate system.\n"
+        "The camera is looking down the negative c->axisZ direction.\n\n");
     }
 }
 
