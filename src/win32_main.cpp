@@ -2117,6 +2117,8 @@ void ParseArgs() {
                         break;
                 }
             }
+    
+    printf("\n");
 }
 
 void DefineCamera(camera_t *c) {
