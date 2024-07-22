@@ -2110,8 +2110,10 @@ void ParseArgs() {
                         break;
                     case 'd': g_use_pinhole=false;
                         break;
+                    case '-':
+                        break; // skip but do not give warning.
                     default:
-                        // nothing to see here, folks.
+                        printf("Warning: invalid program arugment -%c\n", c);
                         break;
                 }
             }
