@@ -65,11 +65,8 @@ m                             - Disable loading metalness material textures.
 r                             - Disable loading roughness material textures.
 h                             - Print this help menu.
 ```
+
 # Steps for Building
-
-After setting up the build environment, simply run build.bat.
-
-Happy path tracing!
 
 ## Build Environment Setup
 
@@ -98,3 +95,7 @@ Copyright (C) Microsoft Corporation.  All rights reserved.
 
 usage: cl [ option... ] filename... [ /link linkoption... ]
 ```
+
+## Build Command
+
+Simply run `build.bat` after setting up the build environment.

@@ -84,7 +84,7 @@ bool IsNotEmissive(const material_t& m);
 
 // GLOBALS
 #define MAX_BOUNCE_COUNT 4
-#define MAX_THREAD_COUNT 16
+#define MAX_THREAD_COUNT 512
 #define THREAD_GROUP_SIZE 32
 #define RAYS_PER_PIXEL_MAX 1000              // for antialiasing.
 #define MIN_HIT_DISTANCE float(1e-4)
@@ -2078,8 +2078,11 @@ void PrintHelp() {
     
 }
 
+typedef BOOL (WINAPI *LPFN_GLPI)(
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION, 
+    PDWORD);
+
 void ParseArgs() {
-    g_tc=MAX_THREAD_COUNT;
     g_sc=8;
     g_pp=4;
 
@@ -2089,12 +2092,56 @@ void ParseArgs() {
     g_use_pinhole=true;
 
     g_worldKind=WORLD_DEFAULT;
+
+    int systemcores = 0;
+    int logicalprocessors = 0;
+
+    LPFN_GLPI glpi;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION cpuinfo = NULL;
+    DWORD rc;
+    DWORD returnlen;
+
+    glpi = (LPFN_GLPI) GetProcAddress(
+                            GetModuleHandle(TEXT("kernel32")),
+                            "GetLogicalProcessorInformation");
+
+    if (glpi) {
+
+    rc = glpi(cpuinfo, &returnlen);
+    if (rc == FALSE && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        cpuinfo = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION)malloc(returnlen);
+        if (cpuinfo && 
+            glpi(cpuinfo, &returnlen) == TRUE) 
+        for( 
+            int i = 0; 
+            i < (returnlen/sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+            i++ ) 
+        {
+            switch(cpuinfo[i].Relationship) {
+                case RelationProcessorCore:
+                    systemcores++;
+                    logicalprocessors += stbi__bitcount(
+                        cpuinfo[i].ProcessorMask);
+                    break;
+                default: break;
+            }
+        }
+        (cpuinfo) ? free(cpuinfo) : void(0);
+    }
+
+    } // if (glpi)
+
+    if (systemcores == 0) systemcores = 1; // default if the above stuff failed.
+    if (logicalprocessors == 0) logicalprocessors = 1; // default if the above stuff failed.
+
+    int maxthreads = min(systemcores, MAX_THREAD_COUNT);
+    g_tc = maxthreads;
     
     for( char **argv=__argv; *argv; argv++ )
         if ( *argv[0]=='-' )
             for( char c; c=*((argv[0])++); ) {
                 switch( c ) {
-                    case 't': g_tc=max(0,min(MAX_THREAD_COUNT,atoi(argv[0])));
+                    case 't': g_tc=max(0,min(maxthreads,atoi(argv[0])));
                         break;
                     case 'p': g_pp=max(0,min(RAYS_PER_PIXEL_MAX,atoi(argv[0])));
                         break;
@@ -2110,11 +2157,16 @@ void ParseArgs() {
                         break;
                     case 'd': g_use_pinhole=false;
                         break;
+                    case '-':
+                        break; // skip but do not give warning.
                     default:
-                        // nothing to see here, folks.
+                        printf("Warning: invalid program arugment -%c\n", c);
                         break;
                 }
             }
+    
+    printf("System has %d core(s).\n", systemcores); // if we print the system cores, when they read the truncated thread count w.r.t. their input, they will understand why it was truncated.
+    printf("Using %d thread(s).\n\n", g_tc); // want to print this so that user has feedback - g_tc may not be exactly what they passed on cmdline, plus they don't know what the default is.
 }
 
 void DefineCamera(camera_t *c) {
