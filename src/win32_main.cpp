@@ -284,7 +284,9 @@ int main()
 
 constexpr int COSINE_PDF=0;
 constexpr int TO_SPHERE_PDF=1;
+constexpr int TO_QUAD_PDF=2;
 
+// TODO: this interface needs to improve: i.e. add hittable.
 template<int Pdf>
 float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f))
 {
@@ -294,6 +296,29 @@ float PdfValue(v3 dir, sphere_t sphere={}, v3 from=V3(0.f,0.f,0.f))
     }
 
     return 0.f;
+}
+
+float PdfValueQuad(v3 dir, quad_t quad, v3 from)
+{
+    // TODO: now this is becoming copy pasta between different
+    // functions, there needs to be a cleanup.
+    float minHitDistance = MIN_HIT_DISTANCE;
+
+    float t = RayIntersectPlanarShape<PLANAR_QUAD>(from, dir, 
+        minHitDistance, quad.point, quad.u, quad.v);
+    if (t <= minHitDistance) return 0.f;
+
+    v3 N = Cross(quad.u,quad.v);
+
+    float area = Magnitude(N);
+
+    float magnitude = Magnitude(dir);
+
+    float distance_squared = t * t * magnitude * magnitude;
+    float cosine = std::fabs( Dot(dir, N) / magnitude);
+
+    return distance_squared / (cosine * area);
+
 }
 
 template<>
